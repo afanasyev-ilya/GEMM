@@ -514,8 +514,16 @@ gemm_vector_loads(const __nv_bfloat16* __restrict__ A,
     static_assert(BK % MMA_K == 0, "BK must be multiple of 16");
 
     // --- vectorization config for bf16 ---
+    // unit4 is vector of 4 int elements, 4 * sizeof(int) = 16 byte
+    // this means 16 / sizeof(bf16) = 8 vectorized element loads for one instruction
+    // unit64 is just a struct, something like this:
+    // typedef struct {
+    //     unsigned int x, y, z, w;
+    // } uint4;
+    // this way we achieve 16 byte * 8 = 128 bit copy, longest possible in CUDA using sinle vector instruction
     constexpr int VECTOR_LENGTH = 8;          // 8 bf16 per 16-byte vector
     using Vec = uint4;                    // 16-byte raw vector
+
     static_assert(BK % VECTOR_LENGTH == 0, "BK must be multiple of vector width");
     static_assert(BN % VECTOR_LENGTH == 0, "BN must be multiple of vector width");
 
