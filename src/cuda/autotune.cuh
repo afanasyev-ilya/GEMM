@@ -209,7 +209,7 @@ void run_autotuned_generic(const typename Spec::Config cfg,
                     launch,
                     name,
                     1.0f, 0.0f,
-                    verify, false
+                    verify, true
                 );
 
                 launched = true;

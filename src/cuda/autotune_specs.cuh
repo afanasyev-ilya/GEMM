@@ -33,8 +33,9 @@ struct VecSmemSpec {
 
     template<int BM, int BN, int BK, int TM, int TN>
     static constexpr bool valid() {
-        constexpr bool threads_fit = ((BM * BN) / (TM * TN)) <= 256;
-        return threads_fit;
+        /*constexpr bool threads_fit = ((BM * BN) / (TM * TN)) <= 256;
+        return threads_fit;*/
+        return true;
     }
 
     template<int BM, int BN, int BK, int TM, int TN>
