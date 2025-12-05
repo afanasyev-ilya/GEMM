@@ -162,10 +162,10 @@ typename Spec::Config autotune_generic(cublasHandle_t handle,
     return best;
 }
 
-template<typename Spec>
+template<typename FloatType, typename Spec>
 void run_autotuned_generic(const typename Spec::Config cfg,
                            cublasHandle_t handle,
-                           const float* dA, const float* dB, float* dC,
+                           const FloatType* dA, const FloatType* dB, float* dC,
                            int M, int N, int K, int iters,
                            std::string_view name, bool verify)
 {
@@ -179,7 +179,7 @@ void run_autotuned_generic(const typename Spec::Config cfg,
 
                 auto launch = make_launcher<Spec::template Kernel<P...>>(grid, block);
 
-                run_gemm_bench<float>(
+                run_gemm_bench<FloatType>(
                     handle, M, N, K,
                     dA, dB, dC,
                     iters,

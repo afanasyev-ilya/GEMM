@@ -181,7 +181,9 @@ struct WMMASpec {
 
     template<int BM, int BN, int BK, int WM, int WN>
     static constexpr bool valid() {
-        return true;
+        constexpr size_t MAX_STATIC_SMEM = 48 * 1024; // 48 KiB
+        bool fits_shared = (BM*BK + BK*BN)*sizeof(__nv_bfloat16) <= MAX_STATIC_SMEM;
+        return fits_shared;
     }
 
     template<int BM, int BN, int BK, int WM, int WN>

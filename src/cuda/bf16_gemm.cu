@@ -495,12 +495,13 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
 
 #include "autotune.cuh"
 
-using BMs  = ValueList<128>;
-using BNs  = ValueList<128>;
-using BKs  = ValueList<16, 32>;
+using BMs  = ValueList<128, 256>;
+using BNs  = ValueList<128, 256>;
+using BKs  = ValueList<16, 32, 64>;
 
-using WMs  = ValueList<64>;
-using WNs  = ValueList<64>;
+
+using WMs  = ValueList<32, 64, 128>;
+using WNs  = ValueList<32, 64, 128>;
 
 using TMs  = ValueList<4>;
 using TNs  = ValueList<4>;
@@ -612,9 +613,9 @@ int main(int argc, char** argv)
         }
 
         {
-            //auto cfg = autotune_generic<WMMASpec>(handle, dA, dB, dC, M, N, K, iters, verify);
             auto cfg = autotune_generic<__nv_bfloat16, WMMASpec>(handle, dA, dB, dC, M, N, K, iters, verify);
-            std::cout << "config WMMA " << cfg << std::endl; 
+            std::cout << "best config WMMA " << cfg << std::endl; 
+            run_autotuned_generic<__nv_bfloat16, WMMASpec>(cfg, handle, dA, dB, dC, M, N, K, iters, "autotuned WMMA", verify);
         }
     }
 
