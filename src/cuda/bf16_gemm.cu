@@ -553,6 +553,8 @@ int main(int argc, char** argv)
     float alpha = 1.0;
     float beta = 0.0;
 
+    bool verify = true;
+
     {
         std::cout << "\n -------------- BF16 tests -------------- \n";
         run_cublas_rowmajor_gemm<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, "cuBLAS BF16 TC");
@@ -598,6 +600,12 @@ int main(int argc, char** argv)
         {
             auto launch = make_launcher<wmma_bf16_gemm_vector_loads_kernel<BM, BN, BK, WM, WN>>(opt_grid, opt_block);
             run_gemm_bench<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, launch, "WMMA vector loads", alpha, beta);
+        }
+
+        {
+            //auto cfg = autotune_generic<WMMASpec>(handle, dA, dB, dC, M, N, K, iters, verify);
+            auto cfg = autotune_generic<__nv_bfloat16, WMMASpec>(handle, dA, dB, dC, M, N, K, iters, verify);
+            std::cout << "config WMMA " << cfg << std::endl; 
         }
     }
 

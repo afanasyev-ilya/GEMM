@@ -133,9 +133,9 @@ void static_for_product(Func&& f) {
 // Generic bench helper
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Spec, int... P>
+template<typename FloatType, typename Spec, int... P>
 double bench_config_generic(cublasHandle_t handle,
-                            const float* dA, const float* dB, float* dC,
+                            const FloatType* dA, const FloatType* dB, float* dC,
                             int M, int N, int K, int iters, bool verify)
 {
     dim3 block = Spec::template block<P...>();
@@ -148,7 +148,7 @@ double bench_config_generic(cublasHandle_t handle,
 
     auto launch = make_launcher<Spec::template Kernel<P...>>(grid, block);
 
-    return run_gemm_bench<float>(
+    return run_gemm_bench<FloatType>(
         handle, M, N, K,
         dA, dB, dC,
         iters,
@@ -163,9 +163,9 @@ double bench_config_generic(cublasHandle_t handle,
 // Generic autotune engine
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Spec>
+template<typename FloatType, typename Spec>
 typename Spec::Config autotune_generic(cublasHandle_t handle,
-                                       const float* dA, const float* dB, float* dC,
+                                       const FloatType* dA, const FloatType* dB, float* dC,
                                        int M, int N, int K, int iters, bool verify)
 {
     using Cfg = typename Spec::Config;
@@ -175,7 +175,7 @@ typename Spec::Config autotune_generic(cublasHandle_t handle,
 
     Spec::for_each([&]<int... P>() {
         if constexpr (Spec::template valid<P...>()) {
-            double g = bench_config_generic<Spec, P...>(
+            double g = bench_config_generic<FloatType, Spec, P...>(
                 handle, dA, dB, dC, M, N, K, iters, verify
             );
             Spec::update_best(best, g, P...);

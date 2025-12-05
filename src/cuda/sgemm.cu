@@ -874,13 +874,13 @@ int main(int argc, char** argv)
 
     // do autotuning for vectorize smem version
     {   
-        auto cfg = autotune_generic<VecSmemSpec>(handle, dA, dB, dC, M, N, K, iters, verify);
+        auto cfg = autotune_generic<float, VecSmemSpec>(handle, dA, dB, dC, M, N, K, iters, verify);
         run_autotuned_generic<VecSmemSpec>(cfg, handle, dA, dB, dC, M, N, K, iters, "autotuned vectorized copy", verify);
     }
 
     // da autotune for warp tiling
     {   
-        auto cfg_wt = autotune_generic<WarpTilingSpec>(handle, dA, dB, dC, M, N, K, iters, verify);
+        auto cfg_wt = autotune_generic<float, WarpTilingSpec>(handle, dA, dB, dC, M, N, K, iters, verify);
         run_autotuned_generic<WarpTilingSpec>(cfg_wt, handle, dA, dB, dC, M, N, K, iters, "warp tiling", verify);
     }
 
