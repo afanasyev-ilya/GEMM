@@ -132,12 +132,12 @@ double run_gemm_bench(
 {
     const int64_t sizeC = int64_t(M) * N;
 
+    CHECK_CUDA(cudaMemset(dC, 0, sizeC * sizeof(float)));
+
     auto do_launch = [&]() {
         // pass pointers + sizes to the launch callable
         launch(dA, dB, dC, M, N, K, alpha, beta);
     };
-
-    CHECK_CUDA(cudaMemset(dC, 0, sizeC * sizeof(float)));
 
     // Warm-up
     do_launch();

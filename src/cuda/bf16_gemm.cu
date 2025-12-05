@@ -268,24 +268,27 @@ wmma_bf16_gemm_warp_tiling_kernel(const __nv_bfloat16* __restrict__ A,
             int row = warp_c_row + mi * MMA_M;
             int col = warp_c_col + nj * MMA_N;
 
-            if (row < M && col < N) {
+            // safest guard for WMMA load/store
+            if (row + MMA_M <= M && col + MMA_N <= N) {
                 float* c_ptr = &C[row * ldc + col];
 
-                // Write MMA tile into global C (row-major)
-                wmma::store_matrix_sync(c_ptr, c_frags[mi][nj], ldc, wmma::mem_row_major);
+                if (beta != 0.0f) {
+                    wmma::fragment<wmma::accumulator, MMA_M, MMA_N, MMA_K, float> c_old;
+                    wmma::load_matrix_sync(c_old, c_ptr, ldc, wmma::mem_row_major);
 
-                // Apply alpha/beta if you want it fused here:
-                // (simplest: post-process in-place)
-                for (int i = 0; i < MMA_M; ++i) {
-                    int gr = row + i;
-                    if (gr >= M) break;
-                    for (int j = 0; j < MMA_N; ++j) {
-                        int gc = col + j;
-                        if (gc >= N) break;
-                        int idx = gr * ldc + gc;
-                        C[idx] = alpha * C[idx] + beta * C[idx];
+                    #pragma unroll
+                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
+                        c_frags[mi][nj].x[e] =
+                            alpha * c_frags[mi][nj].x[e] + beta * c_old.x[e];
+                    }
+                } else {
+                    #pragma unroll
+                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
+                        c_frags[mi][nj].x[e] *= alpha;
                     }
                 }
+
+                wmma::store_matrix_sync(c_ptr, c_frags[mi][nj], ldc, wmma::mem_row_major);
             }
         }
     }
@@ -473,7 +476,7 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
     }
 
     // ----------------------------
-    // 3) Store accumulators to C (epilogue – same as you had, or tune later)
+    // 3) Store accumulators to C (+ alpha/beta epilogue)
     // ----------------------------
     #pragma unroll
     for (int mi = 0; mi < WARP_M_TILES; ++mi) {
@@ -482,11 +485,27 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
             int row = warp_c_row + mi * MMA_M;
             int col = warp_c_col + nj * MMA_N;
 
-            if (row < M && col < N) {
+            // safest guard for WMMA load/store
+            if (row + MMA_M <= M && col + MMA_N <= N) {
                 float* c_ptr = &C[row * ldc + col];
 
-                wmma::store_matrix_sync(c_ptr, c_frags[mi][nj],
-                                        ldc, wmma::mem_row_major);
+                if (beta != 0.0f) {
+                    wmma::fragment<wmma::accumulator, MMA_M, MMA_N, MMA_K, float> c_old;
+                    wmma::load_matrix_sync(c_old, c_ptr, ldc, wmma::mem_row_major);
+
+                    #pragma unroll
+                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
+                        c_frags[mi][nj].x[e] =
+                            alpha * c_frags[mi][nj].x[e] + beta * c_old.x[e];
+                    }
+                } else {
+                    #pragma unroll
+                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
+                        c_frags[mi][nj].x[e] *= alpha;
+                    }
+                }
+
+                wmma::store_matrix_sync(c_ptr, c_frags[mi][nj], ldc, wmma::mem_row_major);
             }
         }
     }
@@ -562,8 +581,6 @@ int main(int argc, char** argv)
 
         auto launch = make_launcher<wmma_bf16_naive_kernel>(naive_grid, naive_block);
         run_gemm_bench<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, launch, "WMMA naive", alpha, beta);
-        
-        run_gemm_bench<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, launch, "WMMA naive", alpha, beta);
     }
 
     {
@@ -571,7 +588,7 @@ int main(int argc, char** argv)
         dim3 cta_block(32, 4, 4);
         dim3 cta_grid(1, (M - 1)/(WMMA_M*4) + 1, (N - 1)/(WMMA_N*4) + 1);
 
-        auto launch = make_launcher<wmma_bf16_cta_kernel>(cta_block, cta_grid);
+        auto launch = make_launcher<wmma_bf16_cta_kernel>(cta_grid, cta_block);
         run_gemm_bench<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, launch, "WMMA CTA", alpha, beta);
     }
 
@@ -590,14 +607,15 @@ int main(int argc, char** argv)
         dim3 opt_block(WARP_SIZE, WARPS_PER_BLOCK);
         dim3 opt_grid(CEIL_DIV(N, BN), CEIL_DIV(M, BM), 1);
 
-        auto launch = make_launcher<wmma_bf16_gemm_warp_tiling_kernel<BM, BN, BK, WM, WN>>(opt_block, opt_grid);
-        run_gemm_bench<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, launch, "WMMA warp tiling", alpha, beta);
+        {
+            auto launch = make_launcher<wmma_bf16_gemm_warp_tiling_kernel<BM, BN, BK, WM, WN>>(opt_grid, opt_block);
+            run_gemm_bench<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, launch, "WMMA warp tiling", alpha, beta);
+        }
 
-        //run_wmma_bf16_gemm<gemm_warp_tiling<BM, BN, BK, WM, WN>>(M, N, K, dA, dB, dC, iters, opt_block, opt_grid, handle, "warp tiling");
-    
-        // is 256, 128, 16, 32, 64 better
-        //run_wmma_bf16_gemm<gemm_vector_loads<BM, BN, BK, WM, WN>>(M, N, K, dA, dB, dC, iters, opt_block, opt_grid, handle, "vector loading");
-        //run_wmma_bf16_gemm<gemm_vector_loads<256, 128, 16, 32, 64>>(M, N, K, dA, dB, dC, iters, opt_block, opt_grid, handle, "vector loading");
+        {
+            auto launch = make_launcher<wmma_bf16_gemm_vector_loads_kernel<BM, BN, BK, WM, WN>>(opt_grid, opt_block);
+            run_gemm_bench<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, launch, "WMMA vector loads", alpha, beta);
+        }
     }
 
     CHECK_CUBLAS(cublasDestroy(handle));
