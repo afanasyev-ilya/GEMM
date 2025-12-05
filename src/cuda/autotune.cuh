@@ -89,6 +89,23 @@ inline std::ostream& operator<<(std::ostream& os, const ConfigWarpTiling& c) {
     return os;
 }
 
+struct ConfigWMMA {
+    int BM, BN, BK, WM, WN;
+    double flops; // TFLOP/s
+};
+
+inline std::ostream& operator<<(std::ostream& os, const ConfigWMMA& c) {
+    os << "Config{"
+       << "BM=" << c.BM
+       << ", BN=" << c.BN
+       << ", BK=" << c.BK
+       << ", WM=" << c.WM
+       << ", WN=" << c.WN
+       << ", flops=" << c.flops
+       << "}";
+    return os;
+}
+
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // static_for_product (cartesian product)
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -177,8 +194,6 @@ void run_autotuned_generic(const typename Spec::Config cfg,
 {
     bool launched = false;
 
-    std::cout << "requested config 11: " << cfg << std::endl;
-
     Spec::for_each([&]<int... P>() {
         if constexpr (Spec::template valid<P...>()) {
             if (Spec::match(cfg, P...)) {
@@ -202,10 +217,7 @@ void run_autotuned_generic(const typename Spec::Config cfg,
         }
     });
 
-    std::cout << launched << " here!\n";
-
     if (!launched) {
-        std::cout << "requested config 22: " << cfg << std::endl;
         throw std::runtime_error("Autotuned cfg is not in the compiled search space");
     }
 }

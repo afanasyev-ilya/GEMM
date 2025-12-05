@@ -493,6 +493,11 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+#include "autotune.cuh"
+#include "autotune_specs.cuh"
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
 int main(int argc, char** argv)
 {
     int size_sq = 4096;
@@ -593,6 +598,10 @@ int main(int argc, char** argv)
         {
             auto launch = make_launcher<wmma_bf16_gemm_vector_loads_kernel<BM, BN, BK, WM, WN>>(opt_grid, opt_block);
             run_gemm_bench<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, launch, "WMMA vector loads", alpha, beta);
+        }
+
+        {
+            
         }
     }
 

@@ -881,8 +881,7 @@ int main(int argc, char** argv)
     // da autotune for warp tiling
     {   
         auto cfg_wt = autotune_generic<WarpTilingSpec>(handle, dA, dB, dC, M, N, K, iters, verify);
-        /*std::cout << "resulting WT config " << cfg_wt << "\n\n";
-        run_autotuned_wt(cfg_wt, handle, dA, dB, dC, M, N, K, iters, "warp tiling", verify);*/
+        run_autotuned_generic<WarpTilingSpec>(cfg_wt, handle, dA, dB, dC, M, N, K, iters, "warp tiling", verify);
     }
 
     {   

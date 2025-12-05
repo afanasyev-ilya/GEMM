@@ -6,6 +6,14 @@
 
 inline constexpr int quite_autotune = false;
 
+// forward declaration is needed
+template<int TILE_M, int TILE_N, int TILE_K, int MICRO_M, int MICRO_N>
+__global__ void sgemm_vectorize_smem(const float * __restrict__ A,
+                                     const float * __restrict__ B, 
+                                     float * __restrict__ C, 
+                                     int M, int N, int K,
+                                     float alpha, float beta);
+
 struct VecSmemSpec {
     using Config = ::Config;
 
@@ -69,6 +77,15 @@ struct VecSmemSpec {
     }
 };
 
+// forward declaration is needed
+template<int BM, int BN, int BK, int WM, int WN, int TM, int TN>
+__global__ void
+sgemm_warp_tiling(const float * __restrict__ A,
+                                  const float * __restrict__ B,
+                                  float * __restrict__  C,
+                                  int M, int N, int K,
+                                  float alpha, float beta);
+
 struct WarpTilingSpec {
     using Config = ::ConfigWarpTiling;
 
@@ -92,7 +109,6 @@ struct WarpTilingSpec {
         //constexpr bool warp_valid  = (WM / TM) * (WN / TN) == 32; // TODO fix ME
         constexpr bool warp_fits_block = (BM >= WM) && (BN >= WN);
         return threads_fit && warp_fits_block;
-        return true;
     }
 
     template<int BM, int BN, int BK, int WM, int WN, int TM, int TN>
@@ -135,3 +151,69 @@ struct WarpTilingSpec {
         }
     }
 };
+
+// forward declaration is needed
+template<int BM, int BN, int BK, int WM, int WN>
+__global__ void
+wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
+                                   const __nv_bfloat16* __restrict__ B,
+                                   float      * __restrict__ C,
+                                   int M, int N, int K,
+                                   float alpha, float beta);
+
+struct WMMASpec {
+    using Config = ::ConfigWMMA;
+
+    static Config empty() { return {0,0,0,0,0,0.0}; }
+
+    static constexpr std::string_view bench_name() {
+        return "autotune WMMA";
+    }
+
+    template<int BM, int BN, int BK, int WM, int WN>
+    static constexpr auto Kernel = wmma_bf16_gemm_vector_loads_kernel<BM, BN, BK, WM, WN>;
+
+    template<typename Func>
+    static void for_each(Func&& f) {
+        static_for_product<BMs, BNs, BKs, WMs, WNs>(std::forward<Func>(f));
+    }
+
+    template<int BM, int BN, int BK, int WM, int WN>
+    static constexpr bool valid() {
+        return true;
+    }
+
+    template<int BM, int BN, int BK, int WM, int WN>
+    static dim3 block() {
+        return dim3(1, 1, 1);
+    }
+
+    template<int BM, int BN, int BK, int WM, int WN>
+    static dim3 grid(int M, int N) {
+        dim3 b = block<BM, BN, BK, WM, WN>();
+        return dim3(1, 1);
+    }
+
+    static bool match(const Config& c, int BM, int BN, int BK, int WM, int WN) {
+        return c.BM == BM && c.BN == BN && c.BK == BK &&
+               c.WM == WM && c.WN == WN;
+    }
+
+    static void update_best(Config& best, double g,
+                            int BM, int BN, int BK, int WM, int WN)
+    {
+        if (!quite_autotune) {
+            std::cout << "Tested: " << BM << " " << BN << " " << BK
+                      << " | " << WM << " " << WN
+                      << " -> " << g << " TFLOP/s ";
+        }
+
+        if (g > best.flops) {
+            if (!quite_autotune) std::cout << "(new best found!)\n";
+            best = {BM, BN, BK, WM, WN, g};
+        } else {
+            if (!quite_autotune) std::cout << "\n";
+        }
+    }
+};
+
