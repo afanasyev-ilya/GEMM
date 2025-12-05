@@ -217,3 +217,78 @@ double run_gemm_bench(
 
     return tflops;
 }
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+void run_cublas_bf16_tc_gemm(
+    cublasHandle_t handle,
+    int M, int N, int K,
+    const __nv_bfloat16* dA_bf16, const __nv_bfloat16* dB_bf16, float* dC_f32,
+    int iters)
+{
+    float alpha = 1.0f;
+    float beta  = 0.0f;
+
+    // Row-major trick, same as your FP32 version:
+    // C_row = A_row * B_row  (M x K, K x N)
+    // Use column-major with:
+    //   C_col (N x M) = B_col (N x K) * A_col (K x M)
+    // so m=N, n=M, k=K, A=B_row, B=A_row, C=C_row.
+    int m = N;
+    int n = M;
+    int k = K;
+    int lda = N;  // B_row leading dim
+    int ldb = K;  // A_row leading dim
+    int ldc = N;  // C_row leading dim
+
+    // Warm-up
+    CHECK_CUBLAS(cublasGemmEx(
+        handle,
+        CUBLAS_OP_N, CUBLAS_OP_N,
+        m, n, k,
+        &alpha,
+        dB_bf16, CUDA_R_16BF, lda,
+        dA_bf16, CUDA_R_16BF, ldb,
+        &beta,
+        dC_f32, CUDA_R_32F, ldc,
+        CUBLAS_COMPUTE_32F,
+        CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    // Timing
+    cudaEvent_t start, stop;
+    CHECK_CUDA(cudaEventCreate(&start));
+    CHECK_CUDA(cudaEventCreate(&stop));
+
+    CHECK_CUDA(cudaEventRecord(start));
+    for (int i = 0; i < iters; ++i) {
+        CHECK_CUBLAS(cublasGemmEx(
+            handle,
+            CUBLAS_OP_N, CUBLAS_OP_N,
+            m, n, k,
+            &alpha,
+            dB_bf16, CUDA_R_16BF, lda,
+            dA_bf16, CUDA_R_16BF, ldb,
+            &beta,
+            dC_f32, CUDA_R_32F, ldc,
+            CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    }
+    CHECK_CUDA(cudaEventRecord(stop));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+
+    float total_ms = 0.0f;
+    CHECK_CUDA(cudaEventElapsedTime(&total_ms, start, stop));
+
+    CHECK_CUDA(cudaEventDestroy(start));
+    CHECK_CUDA(cudaEventDestroy(stop));
+
+    double avg_ms = total_ms / iters;
+    double flops  = 2.0 * double(M) * double(N) * double(K);
+    double tflops = flops / (avg_ms * 1e-3) / 1e12;
+
+    std::cout << "[cuBLAS BF16 TC] avg time: " << avg_ms
+              << " ms, " << tflops << " TFLOP/s" << std::endl << std::endl;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////

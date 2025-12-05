@@ -15,9 +15,11 @@ namespace wmma = nvcuda::wmma;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Tensor Core tile shape (Ampere)
 constexpr int WMMA_M = 16;
 constexpr int WMMA_N = 16;
 constexpr int WMMA_K = 16;
+constexpr int WARP_SIZE = 32;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -124,15 +126,9 @@ wmma_bf16_gemm_warp_tiling_kernel(const __nv_bfloat16* __restrict__ A,
                                   int M, int N, int K,
                                   float alpha, float beta)
 {
-    // Tensor Core tile shape (Ampere)
-    constexpr int MMA_M = 16;
-    constexpr int MMA_N = 16;
-    constexpr int MMA_K = 16;
-    constexpr int WARP_SIZE = 32;
-
-    static_assert(WM % MMA_M == 0, "WM must be multiple of 16");
-    static_assert(WN % MMA_N == 0, "WN must be multiple of 16");
-    static_assert(BK % MMA_K == 0, "BK must be multiple of 16");
+    static_assert(WM % WMMA_M == 0, "WM must be multiple of 16");
+    static_assert(WN % WMMA_N == 0, "WN must be multiple of 16");
+    static_assert(BK % WMMA_K == 0, "BK must be multiple of 16");
 
     // block tile origin in C
     const int block_row = blockIdx.y * BM;
@@ -157,8 +153,8 @@ wmma_bf16_gemm_warp_tiling_kernel(const __nv_bfloat16* __restrict__ A,
     const int warp_c_col = block_col + warp_col * WN;
 
     // Warp tile decomposed into MMA tiles
-    constexpr int WARP_M_TILES = WM / MMA_M;
-    constexpr int WARP_N_TILES = WN / MMA_N;
+    constexpr int WARP_M_TILES = WM / WMMA_M;
+    constexpr int WARP_N_TILES = WN / WMMA_N;
 
     // Shared memory: block tile of A and B
     __shared__ __nv_bfloat16 As[BM][BK];   // M x K
@@ -167,7 +163,7 @@ wmma_bf16_gemm_warp_tiling_kernel(const __nv_bfloat16* __restrict__ A,
     const int num_k_tiles = (K + BK - 1) / BK;
 
     // Accumulator fragments per warp
-    wmma::fragment<wmma::accumulator, MMA_M, MMA_N, MMA_K, float>
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float>
         c_frags[WARP_M_TILES][WARP_N_TILES];
 
     #pragma unroll
@@ -212,16 +208,16 @@ wmma_bf16_gemm_warp_tiling_kernel(const __nv_bfloat16* __restrict__ A,
         // ----------------------------
         // 2) warp-level MMA over this K-tile
         // ----------------------------
-        for (int kk = 0; kk < BK; kk += MMA_K) {
+        for (int kk = 0; kk < BK; kk += WMMA_K) {
 
             // A frags for each "row" of MMA tiles in this warp tile
             wmma::fragment<wmma::matrix_a,
-                           MMA_M, MMA_N, MMA_K,
+                           WMMA_M, WMMA_N, WMMA_K,
                            __nv_bfloat16, wmma::row_major> a_frags[WARP_M_TILES];
 
             #pragma unroll
             for (int mi = 0; mi < WARP_M_TILES; ++mi) {
-                int a_row = (warp_c_row - block_row) + mi * MMA_M; // within As
+                int a_row = (warp_c_row - block_row) + mi * WMMA_M; // within As
                 int a_col = kk;                                    // within As
 
                 const __nv_bfloat16* a_ptr = &As[a_row][a_col];
@@ -230,13 +226,13 @@ wmma_bf16_gemm_warp_tiling_kernel(const __nv_bfloat16* __restrict__ A,
 
             // B frags for each "column" of MMA tiles in this warp tile
             wmma::fragment<wmma::matrix_b,
-                           MMA_M, MMA_N, MMA_K,
+                           WMMA_M, WMMA_N, WMMA_K,
                            __nv_bfloat16, wmma::row_major> b_frags[WARP_N_TILES];
 
             #pragma unroll
             for (int nj = 0; nj < WARP_N_TILES; ++nj) {
                 int b_row = kk;                                    // within Bs
-                int b_col = (warp_c_col - block_col) + nj * MMA_N;
+                int b_col = (warp_c_col - block_col) + nj * WMMA_N;
 
                 const __nv_bfloat16* b_ptr = &Bs[b_row][b_col];
                 wmma::load_matrix_sync(b_frags[nj], b_ptr, BN);
@@ -265,15 +261,15 @@ wmma_bf16_gemm_warp_tiling_kernel(const __nv_bfloat16* __restrict__ A,
     for (int mi = 0; mi < WARP_M_TILES; ++mi) {
         #pragma unroll
         for (int nj = 0; nj < WARP_N_TILES; ++nj) {
-            int row = warp_c_row + mi * MMA_M;
-            int col = warp_c_col + nj * MMA_N;
+            int row = warp_c_row + mi * WMMA_M;
+            int col = warp_c_col + nj * WMMA_N;
 
             // safest guard for WMMA load/store
-            if (row + MMA_M <= M && col + MMA_N <= N) {
+            if (row + WMMA_M <= M && col + WMMA_N <= N) {
                 float* c_ptr = &C[row * ldc + col];
 
                 if (beta != 0.0f) {
-                    wmma::fragment<wmma::accumulator, MMA_M, MMA_N, MMA_K, float> c_old;
+                    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_old;
                     wmma::load_matrix_sync(c_old, c_ptr, ldc, wmma::mem_row_major);
 
                     #pragma unroll
@@ -304,15 +300,9 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
                                    int M, int N, int K,
                                    float alpha, float beta)
 {
-    // Tensor Core tile shape (Ampere)
-    constexpr int MMA_M = 16;
-    constexpr int MMA_N = 16;
-    constexpr int MMA_K = 16;
-    constexpr int WARP_SIZE = 32;
-
-    static_assert(WM % MMA_M == 0, "WM must be multiple of 16");
-    static_assert(WN % MMA_N == 0, "WN must be multiple of 16");
-    static_assert(BK % MMA_K == 0, "BK must be multiple of 16");
+    static_assert(WM % WMMA_M == 0, "WM must be multiple of 16");
+    static_assert(WN % WMMA_N == 0, "WN must be multiple of 16");
+    static_assert(BK % WMMA_K == 0, "BK must be multiple of 16");
 
     // --- vectorization config for bf16 ---
     // unit4 is vector of 4 int elements, 4 * sizeof(int) = 16 byte
@@ -351,8 +341,8 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
     const int warp_c_col = block_col + warp_col * WN;
 
     // Warp tile decomposed into MMA tiles
-    constexpr int WARP_M_TILES = WM / MMA_M;
-    constexpr int WARP_N_TILES = WN / MMA_N;
+    constexpr int WARP_M_TILES = WM / WMMA_M;
+    constexpr int WARP_N_TILES = WN / WMMA_N;
 
     // Shared memory: block tile of A and B
     __shared__ __align__(16) __nv_bfloat16 As[BM][BK];   // M x K
@@ -361,7 +351,7 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
     const int num_k_tiles = (K + BK - 1) / BK;
 
     // Accumulator fragments per warp
-    wmma::fragment<wmma::accumulator, MMA_M, MMA_N, MMA_K, float>
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float>
         c_frags[WARP_M_TILES][WARP_N_TILES];
 
     #pragma unroll
@@ -429,16 +419,16 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
         // ----------------------------
         // 2) warp-level MMA over this K-tile (unchanged)
         // ----------------------------
-        for (int kk = 0; kk < BK; kk += MMA_K) {
+        for (int kk = 0; kk < BK; kk += WMMA_K) {
 
             // A frags for each "row" of MMA tiles in this warp tile
             wmma::fragment<wmma::matrix_a,
-                           MMA_M, MMA_N, MMA_K,
+                           WMMA_M, WMMA_N, WMMA_K,
                            __nv_bfloat16, wmma::row_major> a_frags[WARP_M_TILES];
 
             #pragma unroll
             for (int mi = 0; mi < WARP_M_TILES; ++mi) {
-                int a_row = (warp_c_row - block_row) + mi * MMA_M; // within As
+                int a_row = (warp_c_row - block_row) + mi * WMMA_M; // within As
                 int a_col = kk;                                    // within As
 
                 const __nv_bfloat16* a_ptr = &As[a_row][a_col];
@@ -447,13 +437,13 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
 
             // B frags for each "column" of MMA tiles in this warp tile
             wmma::fragment<wmma::matrix_b,
-                           MMA_M, MMA_N, MMA_K,
+                           WMMA_M, WMMA_N, WMMA_K,
                            __nv_bfloat16, wmma::row_major> b_frags[WARP_N_TILES];
 
             #pragma unroll
             for (int nj = 0; nj < WARP_N_TILES; ++nj) {
                 int b_row = kk;                                    // within Bs
-                int b_col = (warp_c_col - block_col) + nj * MMA_N;
+                int b_col = (warp_c_col - block_col) + nj * WMMA_N;
 
                 const __nv_bfloat16* b_ptr = &Bs[b_row][b_col];
                 wmma::load_matrix_sync(b_frags[nj], b_ptr, BN);
@@ -482,15 +472,15 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
     for (int mi = 0; mi < WARP_M_TILES; ++mi) {
         #pragma unroll
         for (int nj = 0; nj < WARP_N_TILES; ++nj) {
-            int row = warp_c_row + mi * MMA_M;
-            int col = warp_c_col + nj * MMA_N;
+            int row = warp_c_row + mi * WMMA_M;
+            int col = warp_c_col + nj * WMMA_N;
 
             // safest guard for WMMA load/store
-            if (row + MMA_M <= M && col + MMA_N <= N) {
+            if (row + WMMA_M <= M && col + WMMA_N <= N) {
                 float* c_ptr = &C[row * ldc + col];
 
                 if (beta != 0.0f) {
-                    wmma::fragment<wmma::accumulator, MMA_M, MMA_N, MMA_K, float> c_old;
+                    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_old;
                     wmma::load_matrix_sync(c_old, c_ptr, ldc, wmma::mem_row_major);
 
                     #pragma unroll
@@ -572,7 +562,7 @@ int main(int argc, char** argv)
         std::cout << "\n -------------- BF16 tests -------------- \n";
 
         CHECK_CUDA(cudaMemset(dC, 0, bytesC));
-        //run_cublas_bf16_tc_gemm(handle, M, N, K, dA, dB, dC, iters);
+        run_cublas_bf16_tc_gemm(handle, M, N, K, dA, dB, dC, iters);
     }
 
     {
