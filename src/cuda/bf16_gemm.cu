@@ -501,10 +501,6 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
                                    int M, int N, int K,
                                    float alpha, float beta)
 {
-    // Expect these to be defined somewhere globally:
-    // constexpr int WMMA_M = 16;
-    // constexpr int WMMA_N = 16;
-    // constexpr int WMMA_K = 16;
     constexpr int WARP_SIZE = 32;
 
     static_assert(WM % WMMA_M == 0, "WM must be multiple of 16");
@@ -575,7 +571,7 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
     // Lambda: issue cp.async copies for tile `tile_k` into shared buffer `stage`
     // (no commit/wait inside; those are done outside around the compute)
     // -----------------------------------------------------------------------
-#if __CUDA_ARCH__ >= 800
+
     auto cp_async_load_tile = [&](int stage, int tile_k) {
         const int k_base = tile_k * BK;
 
@@ -628,12 +624,11 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
             );
         }
     };
-#endif // __CUDA_ARCH__ >= 800
 
     // -----------------------------------------------------------------------
     // K-tile loop with double buffering and async copies
     // -----------------------------------------------------------------------
-#if __CUDA_ARCH__ >= 800
+
     if (num_k_tiles > 0) {
         // Preload first K-tile into stage 0
         cp_async_load_tile(/*stage=*/0, /*tile_k=*/0);
@@ -705,98 +700,6 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
         }
     }
 
-#else
-    // -------------------------------------------------------------------
-    // Fallback: original synchronous path (no cp.async, still correct).
-    // You can remove this if you only target sm_80+.
-    // -------------------------------------------------------------------
-    for (int tile_k = 0; tile_k < num_k_tiles; ++tile_k) {
-        const int k_base = tile_k * BK;
-
-        // A: BM x BK
-        {
-            #pragma unroll
-            for (int vec_idx = tid; vec_idx < num_vec_A; vec_idx += block_threads) {
-                int linear_elem = vec_idx * VECTOR_LENGTH;
-                int row         = linear_elem / BK;
-                int col         = linear_elem % BK;
-
-                int global_row = block_row + row;
-                int global_col = k_base    + col;
-
-                const Vec* src = reinterpret_cast<const Vec*>(&A[global_row * lda + global_col]);
-                Vec v = *src;
-
-                Vec* dst = reinterpret_cast<Vec*>(&As[0][row][col]);
-                *dst = v;
-            }
-        }
-
-        // B: BK x BN
-        {
-            #pragma unroll
-            for (int vec_idx = tid; vec_idx < num_vec_B; vec_idx += block_threads) {
-                int linear_elem = vec_idx * VECTOR_LENGTH;
-                int row         = linear_elem / BN;
-                int col         = linear_elem % BN;
-
-                int global_row = k_base    + row;
-                int global_col = block_col + col;
-
-                const Vec* src = reinterpret_cast<const Vec*>(&B[global_row * ldb + global_col]);
-                Vec v = *src;
-
-                Vec* dst = reinterpret_cast<Vec*>(&Bs[0][row][col]);
-                *dst = v;
-            }
-        }
-
-        __syncthreads();
-
-        for (int kk = 0; kk < BK; kk += WMMA_K) {
-
-            wmma::fragment<wmma::matrix_a,
-                           WMMA_M, WMMA_N, WMMA_K,
-                           __nv_bfloat16, wmma::row_major> a_frags[WARP_M_TILES];
-
-            #pragma unroll
-            for (int mi = 0; mi < WARP_M_TILES; ++mi) {
-                int a_row = (warp_c_row - block_row) + mi * WMMA_M;
-                int a_col = kk;
-
-                const __nv_bfloat16* a_ptr = &As[0][a_row][a_col];
-                wmma::load_matrix_sync(a_frags[mi], a_ptr, BK);
-            }
-
-            wmma::fragment<wmma::matrix_b,
-                           WMMA_M, WMMA_N, WMMA_K,
-                           __nv_bfloat16, wmma::row_major> b_frags[WARP_N_TILES];
-
-            #pragma unroll
-            for (int nj = 0; nj < WARP_N_TILES; ++nj) {
-                int b_row = kk;
-                int b_col = (warp_c_col - block_col) + nj * WMMA_N;
-
-                const __nv_bfloat16* b_ptr = &Bs[0][b_row][b_col];
-                wmma::load_matrix_sync(b_frags[nj], b_ptr, BN);
-            }
-
-            #pragma unroll
-            for (int mi = 0; mi < WARP_M_TILES; ++mi) {
-                #pragma unroll
-                for (int nj = 0; nj < WARP_N_TILES; ++nj) {
-                    wmma::mma_sync(c_frags[mi][nj],
-                                   a_frags[mi],
-                                   b_frags[nj],
-                                   c_frags[mi][nj]);
-                }
-            }
-        }
-
-        __syncthreads();
-    }
-#endif // async vs sync path
-
     // ----------------------------
     // 3) Store accumulators to C (+ alpha/beta epilogue)
     // ----------------------------
@@ -829,8 +732,8 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
 
 #include "autotune.cuh"
 
-/* original large search space
-using BMs  = ValueList<128, 256>;
+//original large search space
+/*using BMs  = ValueList<128, 256>;
 using BNs  = ValueList<128, 256>;
 using BKs  = ValueList<16, 32, 64>;
 
@@ -838,9 +741,9 @@ using WMs  = ValueList<16, 32, 64, 128>;
 using WNs  = ValueList<16, 32, 64, 128>;*/
 
 // smaller search space for demo and faster compilation
-using BMs  = ValueList<128>;
-using BNs  = ValueList<128>;
-using BKs  = ValueList<32>;
+using BMs  = ValueList<128, 256>;
+using BNs  = ValueList<128, 256>;
+using BKs  = ValueList<32, 64>;
 
 using WMs  = ValueList<32, 64, 128>;
 using WNs  = ValueList<32, 64, 128>;
