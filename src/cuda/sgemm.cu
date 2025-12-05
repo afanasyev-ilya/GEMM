@@ -12,139 +12,6 @@
 
 double BASELINE_TFLOPS = 1;
 
-// -------------------------- wrappers and verification --------------------------
-
-void cublas_ref_gemm(
-    cublasHandle_t handle,
-    int M, int N, int K,
-    const float* dA,  // row-major A[M,K]
-    const float* dB,  // row-major B[K,N]
-    float* dC_ref)    // row-major C[M,N]
-{
-    const float alpha = 1.0f;
-    const float beta  = 0.0f;
-
-    int m = N;
-    int n = M;
-    int k = K;
-    int lda = N;
-    int ldb = K;
-    int ldc = N;
-
-    CHECK_CUBLAS(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &alpha, dB, lda, dA, ldb, &beta, dC_ref, ldc));
-}
-
-using KernelFunc = void(*)(const float* __restrict__ ,
-                           const float* __restrict__ ,
-                           float* __restrict__,
-                           int, int, int, float, float);
-
-template <KernelFunc GemmKernel>
-double run_custom_sgemm(cublasHandle_t handle,
-                        const float* dA, 
-                        const float* dB, 
-                        float* dC,
-                        int M,
-                        int N,
-                        int K,
-                        int iters,
-                        dim3 block_size,
-                        dim3 grid_size,
-                        std::string name,
-                        bool verify = true,
-                        bool verbose = true)
-    {
-    float alpha = 1.0;
-    float betta = 1.0;
-
-    CHECK_CUDA(cudaMemset(dC, 0, M * N * sizeof(float)));
-
-    // Warm-up
-    SAFE_KERNEL_CALL((GemmKernel<<<grid_size, block_size>>> (dA, dB, dC, M, N, K, alpha, betta)));
-    CHECK_CUDA(cudaDeviceSynchronize());
-
-    // Verify
-    if(verify) {
-        int64_t sizeC = int64_t(M) * N;
-
-        // Compute reference FP32 GEMM with cuBLAS
-        float* dC_ref = nullptr;
-        CHECK_CUDA(cudaMalloc(&dC_ref, sizeC * sizeof(float)));
-        CHECK_CUDA(cudaMemset(dC_ref, 0, sizeC * sizeof(float)));
-
-        cublas_ref_gemm(handle, M, N, K, dA, dB, dC_ref);
-        CHECK_CUDA(cudaDeviceSynchronize());
-
-        // Copy both results back to host
-        std::vector<float> hC(sizeC);
-        std::vector<float> hC_ref(sizeC);
-
-        CHECK_CUDA(cudaMemcpy(hC.data(),     dC, sizeC * sizeof(float), cudaMemcpyDeviceToHost));
-        CHECK_CUDA(cudaMemcpy(hC_ref.data(), dC_ref, sizeC * sizeof(float), cudaMemcpyDeviceToHost));
-
-        CHECK_CUDA(cudaFree(dC_ref));
-
-        double max_abs = 0.0;
-        double max_rel = 0.0;
-        for (int64_t i = 0; i < sizeC; ++i) {
-            double ref = hC_ref[i];
-            double val = hC[i];
-            double diff = std::abs(val - ref);
-            double rel  = (std::abs(ref) > 0.0) ? diff / std::abs(ref) : diff;
-
-            max_abs = std::max(diff, max_abs);
-            max_rel = std::max(rel, max_rel);
-        }
-
-        if(verbose)
-            std::cout << "check: max_abs = " << max_abs << ", max_rel = " << max_rel << "   ";
-
-        double tol = 1e-3;  // BF16-level accuracy, adjust if you like
-        bool correct = true;
-        if (max_abs < tol) {
-            if(verbose)
-                std::cout << "  (OK)" << std::endl;
-        } else {
-            if(verbose)
-                std::cout << "  (ERROR)" << std::endl;
-            correct = false;
-        }
-        if(!correct) {
-            return 0.0;
-        }
-    }
-
-    // Timing
-    cudaEvent_t start, stop;
-    CHECK_CUDA(cudaEventCreate(&start));
-    CHECK_CUDA(cudaEventCreate(&stop));
-
-    CHECK_CUDA(cudaEventRecord(start)); 
-    for (int i = 0; i < iters; ++i)
-    {
-        GemmKernel<<<grid_size, block_size>>> (dA, dB, dC, M, N, K, alpha, betta);
-    }
-    CHECK_CUDA(cudaEventRecord(stop));
-    CHECK_CUDA(cudaEventSynchronize(stop));
-
-    float total_ms = 0.0f;
-    CHECK_CUDA(cudaEventElapsedTime(&total_ms, start, stop));
-
-    CHECK_CUDA(cudaEventDestroy(start));
-    CHECK_CUDA(cudaEventDestroy(stop));
-
-    double avg_ms = total_ms / iters;
-    double flops = 2.0 * double(M) * double(N) * double(K);
-    double tflops = flops / (avg_ms * 1e-3) / 1e12;
-
-    if(verbose) {
-        std::cout << "[" << name << "]\n";
-        std::cout << "avg time: " << avg_ms << " ms\n";
-        std::cout << tflops << " TFLOP/s (" << 100.0*(tflops/BASELINE_TFLOPS) << "%)" << std::endl << std::endl;
-    }
-    return tflops;
-}
-
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // main kernels optimized one by one
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -885,7 +752,7 @@ void static_for(ValueList<Is...>, Func&& f) {
 
 inline constexpr int quite_autotune = false;
 
-//#define LARGE_AUTOTUNE_SEARCH_SPACE
+#define LARGE_AUTOTUNE_SEARCH_SPACE
 
 #ifdef LARGE_AUTOTUNE_SEARCH_SPACE
 // Block sizes to try
@@ -952,11 +819,10 @@ double bench_config(cublasHandle_t handle,
     );
 
     bool verbose = false;
-    double flops = run_custom_sgemm<sgemm_vectorize_smem<BM, BN, BK, MICRO_M, MICRO_N>>(
-        handle, dA, dB, dC, M, N, K, iters,
-        block_size, grid_size,
-        "autotune", verify, verbose
-    );
+    
+    auto launch = make_launcher<sgemm_vectorize_smem<BM, BN, BK, MICRO_M, MICRO_N>>(grid_size, block_size);
+    auto flops = run_gemm_bench<float>(handle, M, N, K, dA, dB, dC, iters, launch, "autotune", 1.0f, 0.0f, verify, verbose);
+
     return flops;
 }
 
@@ -1024,8 +890,9 @@ void run_autotuned(const Cfg& cfg,
                             if (cfg.BM == BM && cfg.BN == BN && cfg.BK == BK && cfg.TM == TM && cfg.TN == TN) {
                                 dim3 block_size(BN/TN, BM/TM, 1);
                                 dim3 grid_size(CEIL_DIV(N, block_size.x * TN), CEIL_DIV(M, block_size.y * TM), 1);
-                                run_custom_sgemm<sgemm_vectorize_smem<BM, BN, BK, TM, TN>>(
-                                    handle, dA, dB, dC, M, N, K, iters, block_size, grid_size, name, verify);
+
+                                auto launch = make_launcher<sgemm_vectorize_smem<BM, BN, BK, TM, TN>>(grid_size, block_size);
+                                run_gemm_bench<float>(handle, M, N, K, dA, dB, dC, iters, launch, name, 1.0f, 0.0f, verify, false);
 
                                 launched = true;
                             }
@@ -1089,11 +956,8 @@ double bench_config_wt(cublasHandle_t handle,
         );
 
         bool verbose = false;
-        double flops = run_custom_sgemm<sgemm_warp_tiling<BM, BN, BK, WM, WN, TM, TN>>(
-            handle, dA, dB, dC, M, N, K, iters,
-            block_size, grid_size,
-            "autotune warp tilig", verify, verbose
-        );
+        auto launch = make_launcher<sgemm_warp_tiling<BM, BN, BK, WM, WN, TM, TN>>(grid_size, block_size);
+        auto flops = run_gemm_bench<float>(handle, M, N, K, dA, dB, dC, iters, launch, "autotune warp tilig", 1.0f, 0.0f, verify, verbose);
         return flops;
     } catch(...) {
         return 0.0;
@@ -1176,8 +1040,10 @@ void run_autotuned_wt(const Cfg& cfg,
                                     if (cfg.BM == BM && cfg.BN == BN && cfg.BK == BK && cfg.WM == WM && cfg.WN == WN && cfg.TM == TM && cfg.TN == TN) {
                                         dim3 block_size(BN/TN, BM/TM, 1);
                                         dim3 grid_size(CEIL_DIV(N, block_size.x * TN), CEIL_DIV(M, block_size.y * TM), 1);
-                                        run_custom_sgemm<sgemm_warp_tiling<BM, BN, BK, WM, WN, TM, TN>>(
-                                            handle, dA, dB, dC, M, N, K, iters, block_size, grid_size, name, verify);
+
+                                        bool verbose = false;
+                                        auto launch = make_launcher<sgemm_warp_tiling<BM, BN, BK, WM, WN, TM, TN>>(grid_size, block_size);
+                                        run_gemm_bench<float>(handle, M, N, K, dA, dB, dC, iters, launch, name, 1.0f, 0.0f, verify, verbose);
                                         launched = true;
                                     }
                                 }
@@ -1358,8 +1224,8 @@ int main(int argc, char** argv)
 
         dim3 block_size(BN/MICRO_N, BM/MICRO_M, 1);
         dim3 grid_size(CEIL_DIV(N, block_size.x * MICRO_N), CEIL_DIV(M, block_size.y * MICRO_M), 1);
-        run_custom_sgemm<sgemm_double_buffering<BM, BN, BK, MICRO_M, MICRO_N>>(
-            handle, dA, dB, dC, M, N, K, iters, block_size, grid_size, "double buffering(DB)", verify);
+        auto launch = make_launcher<sgemm_double_buffering<BM, BN, BK, MICRO_M, MICRO_N>>(grid_size, block_size);
+        run_gemm_bench<float>(handle, M, N, K, dA, dB, dC, iters, launch, "double buffering(DB)", 1.0f, 0.0f, verify, true);
     }
     
     CHECK_CUBLAS(cublasDestroy(handle));
