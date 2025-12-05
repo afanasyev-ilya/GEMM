@@ -223,3 +223,72 @@ struct WMMASpec {
     }
 };
 
+template<int BM, int BN, int BK, int WM, int WN>
+__global__ void
+wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
+                                   const __nv_bfloat16* __restrict__ B,
+                                   float      * __restrict__ C,
+                                   int M, int N, int K,
+                                   float alpha, float beta);
+
+struct WMMAAsyncSpec {
+    using Config = ::ConfigWMMA;
+
+    static Config empty() { return {0,0,0,0,0,0.0}; }
+
+    static constexpr std::string_view bench_name() {
+        return "autotune WMMA";
+    }
+
+    template<int BM, int BN, int BK, int WM, int WN>
+    static constexpr auto Kernel = wmma_bf16_gemm_async_kernel<BM, BN, BK, WM, WN>;
+
+    template<typename Func>
+    static void for_each(Func&& f) {
+        static_for_product<BMs, BNs, BKs, WMs, WNs>(std::forward<Func>(f));
+    }
+
+    template<int BM, int BN, int BK, int WM, int WN>
+    static constexpr bool valid() {
+        constexpr size_t MAX_STATIC_SMEM = 48 * 1024; // 48 KiB
+        bool fits_shared = 2*(BM*BK + BK*BN)*sizeof(__nv_bfloat16) <= MAX_STATIC_SMEM;
+        return fits_shared;
+    }
+
+    template<int BM, int BN, int BK, int WM, int WN>
+    static dim3 block() {
+        const int WARPS_PER_BLOCK = (BM / WM) * (BN / WN);
+        constexpr int WARP_SIZE = 32;
+        dim3 wmma_block(WARP_SIZE, WARPS_PER_BLOCK);
+        return wmma_block;
+    }
+
+    template<int BM, int BN, int BK, int WM, int WN>
+    static dim3 grid(int M, int N) {
+        dim3 wmma_grid(CEIL_DIV(N, BN), CEIL_DIV(M, BM), 1);
+        return wmma_grid;
+    }
+
+    static bool match(const Config& c, int BM, int BN, int BK, int WM, int WN) {
+        return c.BM == BM && c.BN == BN && c.BK == BK &&
+               c.WM == WM && c.WN == WN;
+    }
+
+    static void update_best(Config& best, double g,
+                            int BM, int BN, int BK, int WM, int WN)
+    {
+        if (!quite_autotune) {
+            std::cout << "Tested: " << BM << " " << BN << " " << BK
+                      << " | " << WM << " " << WN
+                      << " -> " << g << " TFLOP/s ";
+        }
+
+        if (g > best.flops) {
+            if (!quite_autotune) std::cout << "(new best found!)\n";
+            best = {BM, BN, BK, WM, WN, g};
+        } else {
+            if (!quite_autotune) std::cout << "\n";
+        }
+    }
+};
+
