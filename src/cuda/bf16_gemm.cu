@@ -785,7 +785,9 @@ int main(int argc, char** argv)
 
         run_wmma_bf16_gemm<gemm_warp_tiling<BM, BN, BK, WM, WN>>(M, N, K, dA, dB, dC, iters, opt_block, opt_grid, handle, "warp tiling");
     
+        // is 256, 128, 16, 32, 64 better
         run_wmma_bf16_gemm<gemm_vector_loads<BM, BN, BK, WM, WN>>(M, N, K, dA, dB, dC, iters, opt_block, opt_grid, handle, "vector loading");
+        run_wmma_bf16_gemm<gemm_vector_loads<256, 128, 16, 32, 64>>(M, N, K, dA, dB, dC, iters, opt_block, opt_grid, handle, "vector loading");
     }
 
     CHECK_CUBLAS(cublasDestroy(handle));
