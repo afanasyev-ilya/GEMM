@@ -8,95 +8,9 @@
 #include <cmath>
 #include <cassert>
 #include "macros.cuh"
+#include "bench_common.cuh"
 
 double BASELINE_TFLOPS = 1;
-
-// -------------------------- cublas performance reference --------------------------
-
-void run_cublas_gemm(cublasHandle_t handle, int M, int N, int K, const float* dA, const float* dB, float* dC, int iters)
-{
-    // We store row-major A, B, C in C/C++.
-    // cuBLAS assumes column-major. To avoid data copies, we use the well-known trick:
-    //
-    // Row-major C = A * B  (A[M,K], B[K,N], C[M,N])
-    //
-    // If we treat these same buffers as column-major, they represent the transposed
-    // matrices:
-    //   A_row (M x K, RM)  <->  A_col^T (K x M, CM)
-    //   B_row (K x N, RM)  <->  B_col^T (N x K, CM)
-    //   C_row (M x N, RM)  <->  C_col^T (N x M, CM)
-    //
-    // We want C_row = A_row * B_row.
-    // In column-major:
-    //   C_col = B_col * A_col   (no transposes), where:
-    //     B_col = B_row^T (N x K)
-    //     A_col = A_row^T (K x M)
-    // Then:
-    //   C_col = B_row^T * A_row^T  =>  C_col^T = A_row * B_row
-    // And C_col^T is exactly C_row.
-    //
-    // So we call cublasSgemm with:
-    //   m = N, n = M, k = K
-    //   A = dB (B_row), lda = N
-    //   B = dA (A_row), ldb = K
-    //   C = dC, ldc = N
-
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
-
-    int m = N;
-    int n = M;
-    int k = K;
-    int lda = N;
-    int ldb = K;
-    int ldc = N;
-
-    // Warm-up
-    CHECK_CUBLAS(cublasSgemm(
-        handle,
-        CUBLAS_OP_N, CUBLAS_OP_N,
-        m, n, k,
-        &alpha,
-        dB, lda,
-        dA, ldb,
-        &beta,
-        dC, ldc));
-    CHECK_CUDA(cudaDeviceSynchronize());
-
-    // Timing
-    cudaEvent_t start, stop;
-    CHECK_CUDA(cudaEventCreate(&start));
-    CHECK_CUDA(cudaEventCreate(&stop));
-
-    CHECK_CUDA(cudaEventRecord(start));
-    for (int i = 0; i < iters; ++i)
-    {
-        CHECK_CUBLAS(cublasSgemm(
-            handle,
-            CUBLAS_OP_N, CUBLAS_OP_N,
-            m, n, k,
-            &alpha,
-            dB, lda,
-            dA, ldb,
-            &beta,
-            dC, ldc));
-    }
-    CHECK_CUDA(cudaEventRecord(stop));
-    CHECK_CUDA(cudaEventSynchronize(stop));
-
-    float total_ms = 0.0f;
-    CHECK_CUDA(cudaEventElapsedTime(&total_ms, start, stop));
-
-    CHECK_CUDA(cudaEventDestroy(start));
-    CHECK_CUDA(cudaEventDestroy(stop));
-
-    double avg_ms = total_ms / iters;
-    double flops = 2.0 * double(M) * double(N) * double(K);
-    double tflops = flops / (avg_ms * 1e-3) / 1e12;
-    BASELINE_TFLOPS = tflops;
-
-    std::cout << "[cuBLAS SGEMM]\navg time: " << avg_ms << " ms, \n   TFLOP/s: " << tflops << std::endl << std::endl;
-}
 
 // -------------------------- wrappers and verification --------------------------
 
@@ -987,13 +901,13 @@ using WNs  = ValueList<16, 32, 64>;
 using TMs  = ValueList<1, 2, 4, 8, 16, 32>;
 using TNs  = ValueList<1, 2, 4, 8, 16, 32>;
 #else
-using BMs  = ValueList<64, 128>;
-using BNs  = ValueList<64, 128>;
-using BKs  = ValueList<8, 16>;
+using BMs  = ValueList<128>;
+using BNs  = ValueList<128>;
+using BKs  = ValueList<16, 32>;
 
 // Warp sizes to try
-using WMs  = ValueList<16, 32, 64>;
-using WNs  = ValueList<16, 32, 64>;
+using WMs  = ValueList<16, 32>;
+using WNs  = ValueList<16, 32>;
 
 // Thread sizes to try
 using TMs  = ValueList<4, 8>;
@@ -1339,21 +1253,25 @@ int main(int argc, char** argv)
 
     // cublas reference perf
     {
-        run_cublas_gemm(handle, M, N, K, dA, dB, dC, iters);
+        run_cublas_rowmajor_gemm<float>(handle, M, N, K, dA, dB, dC, iters,  "cuBLAS SGEMM", /*update_baseline=*/true);
     }
 
     if(run_slow)
     {
         dim3 block_size(32, 32, 1);
         dim3 grid_size(CEIL_DIV(N, block_size.x), CEIL_DIV(M, block_size.y), 1);
-        run_custom_sgemm<sgemm_naive>(handle, dA, dB, dC, M, N, K, iters, block_size, grid_size, "naive global", verify);
+        
+        auto launch = make_launcher<sgemm_naive>(grid_size, block_size);
+        run_gemm_bench<float>(handle, M, N, K, dA, dB, dC, iters, launch, "naive global", 1.0f, 0.0f, verify, true);
     }
 
     if(run_slow)
     {
         dim3 block_size(32, 32, 1);
         dim3 grid_size(CEIL_DIV(N, block_size.x), CEIL_DIV(M, block_size.y), 1);
-        run_custom_sgemm<sgemm_coalcesed>(handle, dA, dB, dC, M, N, K, iters, block_size, grid_size, "coalcesed global", verify);
+
+        auto launch = make_launcher<sgemm_coalcesed>(grid_size, block_size);
+        run_gemm_bench<float>(handle, M, N, K, dA, dB, dC, iters, launch, "coalcesed global", 1.0f, 0.0f, verify, true);
     }
 
     if(run_slow)
@@ -1361,7 +1279,9 @@ int main(int argc, char** argv)
         const int TILE_SIZE = 32;
         dim3 block_size(TILE_SIZE, TILE_SIZE, 1);
         dim3 grid_size(CEIL_DIV(N, block_size.x), CEIL_DIV(M, block_size.y), 1);
-        run_custom_sgemm<sgemm_shared<TILE_SIZE>>(handle, dA, dB, dC, M, N, K, iters, block_size, grid_size, "shared", verify);
+
+        auto launch = make_launcher<sgemm_shared<TILE_SIZE>>(grid_size, block_size);
+        run_gemm_bench<float>(handle, M, N, K, dA, dB, dC, iters, launch, "shared", 1.0f, 0.0f, verify, true);
     }
 
     auto run_1d_blocking = [&]<int ELEM_PER_THREAD>() {
@@ -1373,8 +1293,9 @@ int main(int argc, char** argv)
         
         dim3 block_size(BM, BK, 1);
         dim3 grid_size(CEIL_DIV(N, block_size.x), CEIL_DIV(M, block_size.y * ELEM_PER_THREAD), 1);
-        run_custom_sgemm<sgemm_1D_blocking<BM, BN, BK, ELEM_PER_THREAD>>(
-            handle, dA, dB, dC, M, N, K, iters, block_size, grid_size, "1D blocking", verify);
+
+        auto launch = make_launcher<sgemm_1D_blocking<BM, BN, BK, ELEM_PER_THREAD>>(grid_size, block_size);
+        run_gemm_bench<float>(handle, M, N, K, dA, dB, dC, iters, launch, "1D blocking", 1.0f, 0.0f, verify, true);
     };
 
     run_1d_blocking.operator()<4>();
@@ -1390,8 +1311,9 @@ int main(int argc, char** argv)
         const int MICRO_N = 4;
         dim3 block_size(BN/MICRO_N, BM/MICRO_M, 1);
         dim3 grid_size(CEIL_DIV(N, block_size.x * MICRO_N), CEIL_DIV(M, block_size.y * MICRO_M), 1);
-        run_custom_sgemm<sgemm_2D_blocking<BM, BN, BK, MICRO_M, MICRO_N>>(
-            handle, dA, dB, dC, M, N, K, iters, block_size, grid_size, "2D blocking", verify);
+
+        auto launch = make_launcher<sgemm_2D_blocking<BM, BN, BK, MICRO_M, MICRO_N>>(grid_size, block_size);
+        run_gemm_bench<float>(handle, M, N, K, dA, dB, dC, iters, launch, "2D blocking", 1.0f, 0.0f, verify, true);
     }
 
     {
@@ -1402,8 +1324,9 @@ int main(int argc, char** argv)
         const int MICRO_N = 4;
         dim3 block_size(BN/MICRO_N, BM/MICRO_M, 1);
         dim3 grid_size(CEIL_DIV(N, block_size.x * MICRO_N), CEIL_DIV(M, block_size.y * MICRO_M), 1);
-        run_custom_sgemm<sgemm_vectorize_smem<BM, BN, BK, MICRO_M, MICRO_N>>(
-            handle, dA, dB, dC, M, N, K, iters, block_size, grid_size, "vectorize shmem", verify);
+        
+        auto launch = make_launcher<sgemm_vectorize_smem<BM, BN, BK, MICRO_M, MICRO_N>>(grid_size, block_size);
+        run_gemm_bench<float>(handle, M, N, K, dA, dB, dC, iters, launch, "vectorize shmem", 1.0f, 0.0f, verify, true);
     }
 
     // do autotuning
