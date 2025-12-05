@@ -2,7 +2,6 @@
 #include <cuda_bf16.h>
 #include <mma.h>
 
-// Safer than using the whole nvcuda namespace
 namespace wmma = nvcuda::wmma;
 
 #include <cublas_v2.h>
@@ -15,15 +14,6 @@ namespace wmma = nvcuda::wmma;
 #include "macros.cuh"
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
-
-__global__ void convert_f32_to_nvbf16_kernel(const float* __restrict__ in,
-                                             __nv_bfloat16* __restrict__ out,
-                                             int n) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        out[idx] = __float2bfloat16(in[idx]);
-    }
-}
 
 void run_cublas_bf16_tc_gemm(
     cublasHandle_t handle,
@@ -93,7 +83,7 @@ void run_cublas_bf16_tc_gemm(
     double tflops = flops / (avg_ms * 1e-3) / 1e12;
 
     std::cout << "[cuBLAS BF16 TC] avg time: " << avg_ms
-              << " ms,  TFLOP/s: " << tflops << std::endl << std::endl;
+              << " ms, " << tflops << " TFLOP/s" << std::endl << std::endl;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -232,7 +222,7 @@ void run_wmma_bf16_gemm(int M, int N, int K,
     double tflops = flops / (avg_ms * 1e-3) / 1e12;
 
     std::cout << "[" << name << "]   avg time: " << avg_ms
-              << " ms,  TFLOP/s: " << tflops << std::endl << std::endl;
+              << " ms, " << tflops << " TFLOP/s" << std::endl << std::endl;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -524,10 +514,10 @@ gemm_vector_loads(const __nv_bfloat16* __restrict__ A,
     static_assert(BK % MMA_K == 0, "BK must be multiple of 16");
 
     // --- vectorization config for bf16 ---
-    constexpr int VEC_ELEMS = 8;          // 8 bf16 per 16-byte vector
+    constexpr int VECTOR_LENGTH = 8;          // 8 bf16 per 16-byte vector
     using Vec = uint4;                    // 16-byte raw vector
-    static_assert(BK % VEC_ELEMS == 0, "BK must be multiple of vector width");
-    static_assert(BN % VEC_ELEMS == 0, "BN must be multiple of vector width");
+    static_assert(BK % VECTOR_LENGTH == 0, "BK must be multiple of vector width");
+    static_assert(BN % VECTOR_LENGTH == 0, "BN must be multiple of vector width");
 
     // block tile origin in C
     const int block_row = blockIdx.y * BM;
@@ -583,13 +573,13 @@ gemm_vector_loads(const __nv_bfloat16* __restrict__ A,
 
         // A: BM x BK, laid out row-major in global and in shared
         {
-            const int num_vec = (BM * BK) / VEC_ELEMS;
+            const int num_vec = (BM * BK) / VECTOR_LENGTH;
 
             #pragma unroll
             for (int vi = tid; vi < num_vec; vi += block_threads) {
-                int linear_elem = vi * VEC_ELEMS;   // element index in [0, BM*BK)
+                int linear_elem = vi * VECTOR_LENGTH;   // element index in [0, BM*BK)
                 int row         = linear_elem / BK; // [0, BM)
-                int col         = linear_elem % BK; // [0, BK), step VEC_ELEMS
+                int col         = linear_elem % BK; // [0, BK), step VECTOR_LENGTH
 
                 int g_row = block_row + row;
                 int g_col = k_base    + col;
@@ -610,13 +600,13 @@ gemm_vector_loads(const __nv_bfloat16* __restrict__ A,
 
         // B: BK x BN, laid out row-major in global and in shared
         {
-            const int num_vec = (BK * BN) / VEC_ELEMS;
+            const int num_vec = (BK * BN) / VECTOR_LENGTH;
 
             #pragma unroll
             for (int vi = tid; vi < num_vec; vi += block_threads) {
-                int linear_elem = vi * VEC_ELEMS;    // element index in [0, BK*BN)
+                int linear_elem = vi * VECTOR_LENGTH;    // element index in [0, BK*BN)
                 int row         = linear_elem / BN;  // [0, BK)
-                int col         = linear_elem % BN;  // [0, BN), step VEC_ELEMS
+                int col         = linear_elem % BN;  // [0, BN), step VECTOR_LENGTH
 
                 int g_row = k_base    + row;
                 int g_col = block_col + col;
@@ -716,7 +706,7 @@ int main(int argc, char** argv)
     int K = size_sq;
     int iters = 2;
 
-    std::cout << "GEMM benchmark: C = A * B (row-major FP32)\n";
+    std::cout << "BF16 GEMM benchmark: C = A * B (row-major FP32)\n";
     std::cout << "  M = " << M << ", N = " << N << ", K = " << K
         << ", iters = " << iters << "\n";
 
