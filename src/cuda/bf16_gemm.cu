@@ -495,10 +495,18 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
 
 #include "autotune.cuh"
 
+/* original large search space
 using BMs  = ValueList<128, 256>;
 using BNs  = ValueList<128, 256>;
 using BKs  = ValueList<16, 32, 64>;
 
+using WMs  = ValueList<16, 32, 64, 128>;
+using WNs  = ValueList<16, 32, 64, 128>;*/
+
+// smaller search space for demo and faster compilation
+using BMs  = ValueList<128>;
+using BNs  = ValueList<128>;
+using BKs  = ValueList<32>;
 
 using WMs  = ValueList<32, 64, 128>;
 using WNs  = ValueList<32, 64, 128>;
@@ -611,12 +619,13 @@ int main(int argc, char** argv)
             auto launch = make_launcher<wmma_bf16_gemm_vector_loads_kernel<BM, BN, BK, WM, WN>>(opt_grid, opt_block);
             run_gemm_bench<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, launch, "WMMA vector loads", alpha, beta);
         }
+    }
 
-        {
-            auto cfg = autotune_generic<__nv_bfloat16, WMMASpec>(handle, dA, dB, dC, M, N, K, iters, verify);
-            std::cout << "best config WMMA " << cfg << std::endl; 
-            run_autotuned_generic<__nv_bfloat16, WMMASpec>(cfg, handle, dA, dB, dC, M, N, K, iters, "autotuned WMMA", verify);
-        }
+    // we autotune prev version here
+    {
+        auto cfg = autotune_generic<__nv_bfloat16, WMMASpec>(handle, dA, dB, dC, M, N, K, iters, verify);
+        std::cout << "best config WMMA " << cfg << std::endl; 
+        run_autotuned_generic<__nv_bfloat16, WMMASpec>(cfg, handle, dA, dB, dC, M, N, K, iters, "autotuned WMMA", verify);
     }
 
     CHECK_CUBLAS(cublasDestroy(handle));

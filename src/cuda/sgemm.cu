@@ -736,10 +736,8 @@ __global__ void sgemm_double_buffering(const float * __restrict__ A,
 
 #include "autotune.cuh"
 
-//#define LARGE_AUTOTUNE_SEARCH_SPACE
-
-#ifdef LARGE_AUTOTUNE_SEARCH_SPACE
-using BMs  = ValueList<64, 128>;
+// original large search space
+/*using BMs  = ValueList<64, 128>;
 using BNs  = ValueList<64, 128>;
 using BKs  = ValueList<8, 16>;
 
@@ -747,8 +745,9 @@ using WMs  = ValueList<16, 32, 64>;
 using WNs  = ValueList<16, 32, 64>;
 
 using TMs  = ValueList<1, 2, 4, 8, 16, 32>;
-using TNs  = ValueList<1, 2, 4, 8, 16, 32>;
-#else
+using TNs  = ValueList<1, 2, 4, 8, 16, 32>;*/
+
+// search space for faster compilation and demo
 using BMs  = ValueList<128>;
 using BNs  = ValueList<128>;
 using BKs  = ValueList<16, 32>;
@@ -758,7 +757,6 @@ using WNs  = ValueList<16, 32>;
 
 using TMs  = ValueList<4, 8>;
 using TNs  = ValueList<4, 8>;
-#endif
 
 #include "autotune_specs.cuh"
 
