@@ -546,9 +546,7 @@ int main(int argc, char** argv)
 
     {
         std::cout << "\n -------------- BF16 tests -------------- \n";
-
-        CHECK_CUDA(cudaMemset(dC, 0, bytesC));
-        run_cublas_bf16_tc_gemm(handle, M, N, K, dA, dB, dC, iters);
+        run_cublas_rowmajor_gemm<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, "cuBLAS BF16 TC");
     }
 
     {

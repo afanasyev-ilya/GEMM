@@ -219,40 +219,69 @@ double run_gemm_bench(
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
+extern double BASELINE_TFLOPS;
 
-void run_cublas_bf16_tc_gemm(
+// Unified cuBLAS GEMM for row-major A/B/C buffers
+// Tin = float or __nv_bfloat16
+template <typename Tin>
+double run_cublas_rowmajor_gemm(
     cublasHandle_t handle,
     int M, int N, int K,
-    const __nv_bfloat16* dA_bf16, const __nv_bfloat16* dB_bf16, float* dC_f32,
-    int iters)
+    const Tin* dA,   // row-major A[M,K]
+    const Tin* dB,   // row-major B[K,N]
+    float* dC,       // row-major C[M,N] (FP32 output)
+    int iters,
+    std::string_view tag = {},
+    bool update_baseline = false)
 {
-    float alpha = 1.0f;
-    float beta  = 0.0f;
+    static_assert(
+        std::is_same_v<Tin, float> || std::is_same_v<Tin, __nv_bfloat16>,
+        "run_cublas_rowmajor_gemm supports only float or __nv_bfloat16 inputs"
+    );
 
-    // Row-major trick, same as your FP32 version:
-    // C_row = A_row * B_row  (M x K, K x N)
-    // Use column-major with:
-    //   C_col (N x M) = B_col (N x K) * A_col (K x M)
-    // so m=N, n=M, k=K, A=B_row, B=A_row, C=C_row.
-    int m = N;
-    int n = M;
-    int k = K;
-    int lda = N;  // B_row leading dim
-    int ldb = K;  // A_row leading dim
-    int ldc = N;  // C_row leading dim
+    const float alpha = 1.0f;
+    const float beta  = 0.0f;
+
+    // Row-major trick:
+    // C_row(M,N) = A_row(M,K) * B_row(K,N)
+    // -> treat buffers as column-major:
+    // C_col(N,M) = B_col(N,K) * A_col(K,M)
+    const int m = N;
+    const int n = M;
+    const int k = K;
+
+    const int lda = N; // leading dim of B in this mapping
+    const int ldb = K; // leading dim of A
+    const int ldc = N; // leading dim of C
+
+    auto do_gemm = [&]() {
+        if constexpr (std::is_same_v<Tin, float>) {
+            CHECK_CUBLAS(cublasSgemm(
+                handle,
+                CUBLAS_OP_N, CUBLAS_OP_N,
+                m, n, k,
+                &alpha,
+                dB, lda,
+                dA, ldb,
+                &beta,
+                dC, ldc));
+        } else { // __nv_bfloat16
+            CHECK_CUBLAS(cublasGemmEx(
+                handle,
+                CUBLAS_OP_N, CUBLAS_OP_N,
+                m, n, k,
+                &alpha,
+                dB, CUDA_R_16BF, lda,
+                dA, CUDA_R_16BF, ldb,
+                &beta,
+                dC, CUDA_R_32F, ldc,
+                CUBLAS_COMPUTE_32F,
+                CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+        }
+    };
 
     // Warm-up
-    CHECK_CUBLAS(cublasGemmEx(
-        handle,
-        CUBLAS_OP_N, CUBLAS_OP_N,
-        m, n, k,
-        &alpha,
-        dB_bf16, CUDA_R_16BF, lda,
-        dA_bf16, CUDA_R_16BF, ldb,
-        &beta,
-        dC_f32, CUDA_R_32F, ldc,
-        CUBLAS_COMPUTE_32F,
-        CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+    do_gemm();
     CHECK_CUDA(cudaDeviceSynchronize());
 
     // Timing
@@ -262,17 +291,7 @@ void run_cublas_bf16_tc_gemm(
 
     CHECK_CUDA(cudaEventRecord(start));
     for (int i = 0; i < iters; ++i) {
-        CHECK_CUBLAS(cublasGemmEx(
-            handle,
-            CUBLAS_OP_N, CUBLAS_OP_N,
-            m, n, k,
-            &alpha,
-            dB_bf16, CUDA_R_16BF, lda,
-            dA_bf16, CUDA_R_16BF, ldb,
-            &beta,
-            dC_f32, CUDA_R_32F, ldc,
-            CUBLAS_COMPUTE_32F,
-            CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+        do_gemm();
     }
     CHECK_CUDA(cudaEventRecord(stop));
     CHECK_CUDA(cudaEventSynchronize(stop));
@@ -283,12 +302,27 @@ void run_cublas_bf16_tc_gemm(
     CHECK_CUDA(cudaEventDestroy(start));
     CHECK_CUDA(cudaEventDestroy(stop));
 
-    double avg_ms = total_ms / iters;
-    double flops  = 2.0 * double(M) * double(N) * double(K);
-    double tflops = flops / (avg_ms * 1e-3) / 1e12;
+    const double avg_ms = total_ms / iters;
+    const double flops  = 2.0 * double(M) * double(N) * double(K);
+    const double tflops = flops / (avg_ms * 1e-3) / 1e12;
 
-    std::cout << "[cuBLAS BF16 TC] avg time: " << avg_ms
-              << " ms, " << tflops << " TFLOP/s" << std::endl << std::endl;
+    if (update_baseline) {
+        BASELINE_TFLOPS = tflops;
+    }
+
+    if (!tag.empty()) {
+        std::cout << "[" << tag << "] ";
+    } else {
+        if constexpr (std::is_same_v<Tin, float>)
+            std::cout << "[cuBLAS SGEMM] ";
+        else
+            std::cout << "[cuBLAS BF16 TC] ";
+    }
+
+    std::cout << "avg time: " << avg_ms
+              << " ms, " << tflops << " TFLOP/s\n\n";
+
+    return tflops;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
