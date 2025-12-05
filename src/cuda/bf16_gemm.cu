@@ -494,6 +494,17 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 #include "autotune.cuh"
+
+using BMs  = ValueList<128>;
+using BNs  = ValueList<128>;
+using BKs  = ValueList<16, 32>;
+
+using WMs  = ValueList<64>;
+using WNs  = ValueList<64>;
+
+using TMs  = ValueList<4>;
+using TNs  = ValueList<4>;
+
 #include "autotune_specs.cuh"
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
@@ -557,7 +568,7 @@ int main(int argc, char** argv)
 
     {
         std::cout << "\n -------------- BF16 tests -------------- \n";
-        run_cublas_rowmajor_gemm<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, "cuBLAS BF16 TC");
+        run_cublas_rowmajor_gemm<__nv_bfloat16>(handle, M, N, K, dA, dB, dC, iters, "cuBLAS BF16 TC", true);
     }
 
     {

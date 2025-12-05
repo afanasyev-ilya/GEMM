@@ -25,30 +25,6 @@ void static_for(ValueList<Is...>, Func&& f) {
     (f.template operator()<Is>(), ...);
 }
 
-//#define LARGE_AUTOTUNE_SEARCH_SPACE
-
-#ifdef LARGE_AUTOTUNE_SEARCH_SPACE
-using BMs  = ValueList<64, 128>;
-using BNs  = ValueList<64, 128>;
-using BKs  = ValueList<8, 16>;
-
-using WMs  = ValueList<16, 32, 64>;
-using WNs  = ValueList<16, 32, 64>;
-
-using TMs  = ValueList<1, 2, 4, 8, 16, 32>;
-using TNs  = ValueList<1, 2, 4, 8, 16, 32>;
-#else
-using BMs  = ValueList<128>;
-using BNs  = ValueList<128>;
-using BKs  = ValueList<16, 32>;
-
-using WMs  = ValueList<16, 32>;
-using WNs  = ValueList<16, 32>;
-
-using TMs  = ValueList<4, 8>;
-using TNs  = ValueList<4, 8>;
-#endif
-
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // Configs
 /////////////////////////////////////////////////////////////////////////////////////////////////

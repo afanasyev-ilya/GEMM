@@ -32,7 +32,7 @@ struct Launcher {
                              int M, int N, int K,
                              float a, float b) const
     {
-        Kernel<<<grid, block>>>(A, B, C, M, N, K, a, b);
+        SAFE_KERNEL_CALL((Kernel<<<grid, block>>>(A, B, C, M, N, K, a, b)));
     }
 };
 
