@@ -1,25 +1,10 @@
-// gemm_bench.cu
-//
-// Benchmark three FP32 GEMMs (row-major):
-//   1) cuBLAS sgemm
-//   2) Naive CUDA kernel
-//   3) CUTLASS SIMT FP32 (device::Gemm)
-//
-// Problem: C = A * B
-// A: M x K, B: K x N, C: M x N, all row-major.
-//
-// Command line:
-//   ./gemm_bench [M] [N] [K] [iters]
-// Defaults:
-//   M = N = K = 2048, iters = 10
-//
-// Build example (adjust paths & arch as needed):
-//   nvcc -O3 -std=c++17 fp_16_gemm.cu -o fp16_gemm_bench -I ~/cutlass/include -lcublas -arch=sm_86
-// How to profile:
-// sudo /usr/local/cuda-12.3/bin/ncu  --set full --kernel-name "gemm_warp_tensorcore" ./fp16_gemm_bench
-
-
 #include <cuda_runtime.h>
+#include <cuda_bf16.h>
+#include <mma.h>
+
+// Safer than using the whole nvcuda namespace
+namespace wmma = nvcuda::wmma;
+
 #include <cublas_v2.h>
 
 #include <iostream>
@@ -28,8 +13,6 @@
 #include <cstdlib>
 #include <cmath>
 #include "macros.cuh"
-
-#include <mma.h>
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -114,8 +97,6 @@ void run_cublas_bf16_tc_gemm(
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
-
-using namespace nvcuda;
 
 // WMMA tile: 16x16x16 (m,n,k)
 constexpr int WMMA_M = 16;

@@ -1,6 +1,3 @@
-// Build example (adjust paths & arch as needed):
-//   nvcc -O3 -std=c++20 sgemm.cu -o gemm_bench -I ~/cutlass/include -lcublas -arch=sm_86
-
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 
