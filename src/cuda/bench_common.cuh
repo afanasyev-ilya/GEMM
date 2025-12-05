@@ -13,6 +13,12 @@
 
 #include "macros.cuh"
 
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+extern double BASELINE_TFLOPS;
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
 template<auto Kernel>
 struct Launcher {
     dim3 grid;
@@ -36,6 +42,8 @@ inline Launcher<Kernel> make_launcher(dim3 grid, dim3 block,
 {
     return {grid, block, alpha, beta};
 }
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
 
 // -------------------------------
 // Tolerance traits
@@ -212,14 +220,13 @@ double run_gemm_bench(
 
     if (verbose) {
         std::cout << "[" << name << "]   avg time: "
-                  << avg_ms << " ms, " << tflops << " TFLOP/s\n\n";
+                  << avg_ms << " ms, " << tflops << " TFLOP/s (" << 100.0*tflops/BASELINE_TFLOPS << "%)" << std::endl << std::endl;;
     }
 
     return tflops;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
-extern double BASELINE_TFLOPS;
 
 // Unified cuBLAS GEMM for row-major A/B/C buffers
 // Tin = float or __nv_bfloat16
