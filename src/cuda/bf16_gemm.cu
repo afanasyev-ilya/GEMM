@@ -268,20 +268,13 @@ wmma_bf16_gemm_warp_tiling_kernel(const __nv_bfloat16* __restrict__ A,
             if (row + WMMA_M <= M && col + WMMA_N <= N) {
                 float* c_ptr = &C[row * ldc + col];
 
-                if (beta != 0.0f) {
-                    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_old;
-                    wmma::load_matrix_sync(c_old, c_ptr, ldc, wmma::mem_row_major);
+                wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_old;
+                wmma::load_matrix_sync(c_old, c_ptr, ldc, wmma::mem_row_major);
 
-                    #pragma unroll
-                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
-                        c_frags[mi][nj].x[e] =
-                            alpha * c_frags[mi][nj].x[e] + beta * c_old.x[e];
-                    }
-                } else {
-                    #pragma unroll
-                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
-                        c_frags[mi][nj].x[e] *= alpha;
-                    }
+                #pragma unroll
+                for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
+                    c_frags[mi][nj].x[e] =
+                        alpha * c_frags[mi][nj].x[e] + beta * c_old.x[e];
                 }
 
                 wmma::store_matrix_sync(c_ptr, c_frags[mi][nj], ldc, wmma::mem_row_major);
@@ -479,20 +472,13 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
             if (row + WMMA_M <= M && col + WMMA_N <= N) {
                 float* c_ptr = &C[row * ldc + col];
 
-                if (beta != 0.0f) {
-                    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_old;
-                    wmma::load_matrix_sync(c_old, c_ptr, ldc, wmma::mem_row_major);
+                wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_old;
+                wmma::load_matrix_sync(c_old, c_ptr, ldc, wmma::mem_row_major);
 
-                    #pragma unroll
-                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
-                        c_frags[mi][nj].x[e] =
-                            alpha * c_frags[mi][nj].x[e] + beta * c_old.x[e];
-                    }
-                } else {
-                    #pragma unroll
-                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
-                        c_frags[mi][nj].x[e] *= alpha;
-                    }
+                #pragma unroll
+                for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
+                    c_frags[mi][nj].x[e] =
+                        alpha * c_frags[mi][nj].x[e] + beta * c_old.x[e];
                 }
 
                 wmma::store_matrix_sync(c_ptr, c_frags[mi][nj], ldc, wmma::mem_row_major);
