@@ -713,13 +713,21 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
             if (row + WMMA_M <= M && col + WMMA_N <= N) {
                 float* c_ptr = &C[row * ldc + col];
 
-                wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_old;
-                wmma::load_matrix_sync(c_old, c_ptr, ldc, wmma::mem_row_major);
+                if(beta == 0) {
+                    #pragma unroll
+                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
+                        c_frags[mi][nj].x[e] =
+                            alpha * c_frags[mi][nj].x[e];
+                    }
+                } else {
+                    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_old;
+                    wmma::load_matrix_sync(c_old, c_ptr, ldc, wmma::mem_row_major);
 
-                #pragma unroll
-                for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
-                    c_frags[mi][nj].x[e] =
-                        alpha * c_frags[mi][nj].x[e] + beta * c_old.x[e];
+                    #pragma unroll
+                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
+                        c_frags[mi][nj].x[e] =
+                            alpha * c_frags[mi][nj].x[e] + beta * c_old.x[e];
+                    }
                 }
 
                 wmma::store_matrix_sync(c_ptr, c_frags[mi][nj], ldc, wmma::mem_row_major);
@@ -741,8 +749,8 @@ using WMs  = ValueList<16, 32, 64, 128>;
 using WNs  = ValueList<16, 32, 64, 128>;*/
 
 // smaller search space for demo and faster compilation
-using BMs  = ValueList<128, 256>;
-using BNs  = ValueList<128, 256>;
+using BMs  = ValueList<128>;
+using BNs  = ValueList<128>;
 using BKs  = ValueList<32, 64>;
 
 using WMs  = ValueList<32, 64, 128>;
