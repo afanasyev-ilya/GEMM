@@ -576,24 +576,20 @@ gemm_vector_loads(const __nv_bfloat16* __restrict__ A,
             const int num_vec = (BM * BK) / VECTOR_LENGTH;
 
             #pragma unroll
-            for (int vi = tid; vi < num_vec; vi += block_threads) {
-                int linear_elem = vi * VECTOR_LENGTH;   // element index in [0, BM*BK)
+            for (int vec_idx = tid; vec_idx < num_vec; vec_idx += block_threads) {
+                int linear_elem = vec_idx * VECTOR_LENGTH;   // element index in [0, BM*BK)
                 int row         = linear_elem / BK; // [0, BM)
                 int col         = linear_elem % BK; // [0, BK), step VECTOR_LENGTH
 
-                int g_row = block_row + row;
-                int g_col = k_base    + col;
+                int global_row = block_row + row;
+                int global_col = k_base    + col;
 
                 // global address: A[g_row * lda + g_col]
-                const Vec* src = reinterpret_cast<const Vec*>(
-                    &A[g_row * lda + g_col]
-                );
+                const Vec* src = reinterpret_cast<const Vec*>(&A[global_row * lda + global_col]);
                 Vec v = *src;
 
                 // shared address: As[row][col] (same row-major layout)
-                Vec* dst = reinterpret_cast<Vec*>(
-                    &As[row][col]
-                );
+                Vec* dst = reinterpret_cast<Vec*>(&As[row][col]);
                 *dst = v;
             }
         }
@@ -603,22 +599,18 @@ gemm_vector_loads(const __nv_bfloat16* __restrict__ A,
             const int num_vec = (BK * BN) / VECTOR_LENGTH;
 
             #pragma unroll
-            for (int vi = tid; vi < num_vec; vi += block_threads) {
-                int linear_elem = vi * VECTOR_LENGTH;    // element index in [0, BK*BN)
+            for (int vec_idx = tid; vec_idx < num_vec; vec_idx += block_threads) {
+                int linear_elem = vec_idx * VECTOR_LENGTH;    // element index in [0, BK*BN)
                 int row         = linear_elem / BN;  // [0, BK)
                 int col         = linear_elem % BN;  // [0, BN), step VECTOR_LENGTH
 
-                int g_row = k_base    + row;
-                int g_col = block_col + col;
+                int global_row = k_base    + row;
+                int global_col = block_col + col;
 
-                const Vec* src = reinterpret_cast<const Vec*>(
-                    &B[g_row * ldb + g_col]
-                );
+                const Vec* src = reinterpret_cast<const Vec*>(&B[global_row * ldb + global_col]);
                 Vec v = *src;
 
-                Vec* dst = reinterpret_cast<Vec*>(
-                    &Bs[row][col]
-                );
+                Vec* dst = reinterpret_cast<Vec*>(&Bs[row][col]);
                 *dst = v;
             }
         }
