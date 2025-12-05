@@ -116,7 +116,8 @@ double bench_config_generic(cublasHandle_t handle,
 {
     dim3 block = Spec::template block<P...>();
     int threads = int(block.x) * int(block.y) * int(block.z);
-    if (threads > 1024) return 0.0;
+    if (threads > 1024) 
+        return 0.0;
 
     dim3 grid = Spec::template grid<P...>(M, N);
 

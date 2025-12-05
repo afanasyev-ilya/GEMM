@@ -580,7 +580,6 @@ int main(int argc, char** argv)
     }
 
     {
-        CHECK_CUDA(cudaMemset(dC, 0, bytesC));
         dim3 cta_block(32, 4, 4);
         dim3 cta_grid(1, (M - 1)/(WMMA_M*4) + 1, (N - 1)/(WMMA_N*4) + 1);
 
@@ -599,7 +598,6 @@ int main(int argc, char** argv)
 
         const int WARPS_PER_BLOCK = (BM / WM) * (BN / WN);
 
-        CHECK_CUDA(cudaMemset(dC, 0, bytesC));
         dim3 opt_block(WARP_SIZE, WARPS_PER_BLOCK);
         dim3 opt_grid(CEIL_DIV(N, BN), CEIL_DIV(M, BM), 1);
 

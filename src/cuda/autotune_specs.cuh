@@ -186,13 +186,16 @@ struct WMMASpec {
 
     template<int BM, int BN, int BK, int WM, int WN>
     static dim3 block() {
-        return dim3(1, 1, 1);
+        const int WARPS_PER_BLOCK = (BM / WM) * (BN / WN);
+        constexpr int WARP_SIZE = 32;
+        dim3 wmma_block(WARP_SIZE, WARPS_PER_BLOCK);
+        return wmma_block;
     }
 
     template<int BM, int BN, int BK, int WM, int WN>
     static dim3 grid(int M, int N) {
-        dim3 b = block<BM, BN, BK, WM, WN>();
-        return dim3(1, 1);
+        dim3 wmma_grid(CEIL_DIV(N, BN), CEIL_DIV(M, BM), 1);
+        return wmma_grid;
     }
 
     static bool match(const Config& c, int BM, int BN, int BK, int WM, int WN) {
