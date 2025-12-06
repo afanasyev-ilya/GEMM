@@ -4,6 +4,7 @@ add_library(gemm_cuda_common INTERFACE)
 set_source_files_properties(
   sgemm.cu
   bf16_gemm.cu
+  emulation.cu
   PROPERTIES
     LANGUAGE CUDA
 )
@@ -37,6 +38,13 @@ target_link_libraries(sgemm
 
 add_executable(bf16_gemm bf16_gemm.cu)
 target_link_libraries(bf16_gemm
+  PRIVATE
+    gemm_cuda_common
+    CUDA::cublas
+)
+
+add_executable(emulation emulation.cu)
+target_link_libraries(emulation
   PRIVATE
     gemm_cuda_common
     CUDA::cublas
