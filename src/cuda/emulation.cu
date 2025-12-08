@@ -10,6 +10,7 @@ namespace wmma = nvcuda::wmma;
 #include <random>
 #include <cstdlib>
 #include <cmath>
+#include <iomanip>
 #include "macros.cuh"
 #include "bench_common.cuh"
 
@@ -318,6 +319,7 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
     }
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<int BM, int BN, int BK, int WM, int WN>
 __global__ void
@@ -692,8 +694,78 @@ wmma_fp32_emulated(const float* __restrict__ A,
     }
 }
 
-
 /////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<int BM, int BN, int BK, int WM, int WN>
+void benchmark_wmma_fp32_emulated(const float* dA,
+                                  const float* dB,
+                                  float*       dC,
+                                  int M, int N, int K,
+                                  float alpha, float beta,
+                                  dim3 gemm_grid,
+                                  dim3 gemm_block,
+                                  int num_iters = 50)
+{
+    // Warm-up
+    for (int i = 0; i < 2; ++i) {
+        wmma_fp32_emulated<BM, BN, BK, WM, WN>
+            <<<gemm_grid, gemm_block>>>(dA, dB, dC, M, N, K, alpha, beta);
+    }
+    cudaDeviceSynchronize();
+
+    // Create events
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    // Record start
+    cudaEventRecord(start);
+
+    for (int it = 0; it < num_iters; ++it) {
+        wmma_fp32_emulated<BM, BN, BK, WM, WN>
+            <<<gemm_grid, gemm_block>>>(dA, dB, dC, M, N, K, alpha, beta);
+    }
+
+    // Record stop
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float elapsed_ms = 0.0f;
+    cudaEventElapsedTime(&elapsed_ms, start, stop);
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    // Convert to seconds and average per iteration
+    double total_s = elapsed_ms * 1e-3;
+    double avg_s   = total_s / num_iters;
+
+    // Use double to avoid overflow in M*N*K for large sizes
+    double Md = static_cast<double>(M);
+    double Nd = static_cast<double>(N);
+    double Kd = static_cast<double>(K);
+
+    // 1) Logical FP32 GEMM flops: 2*M*N*K
+    double logical_flops = 2.0 * Md * Nd * Kd;
+
+    // 2) Actual BF16 TC flops: 9 times more
+    double bf16_flops = 9.0 * logical_flops;  // = 18*M*N*K
+
+    // Convert to TFLOPs (10^12)
+    double logical_tflops = logical_flops / avg_s / 1.0e12;
+    double bf16_tflops    = bf16_flops    / avg_s / 1.0e12;
+
+    std::cout << std::fixed << std::setprecision(3);
+    std::cout << "M=" << M << " N=" << N << " K=" << K << "\n";
+    std::cout << "Time: " << (avg_s * 1e3) << " ms (avg over "
+              << num_iters << " iters)\n";
+
+    std::cout << "Effective logical FP32 GEMM: "
+              << logical_tflops << " TFLOPs (2*M*N*K)\n";
+
+    std::cout << "Actual BF16 Tensor Core work: "
+              << bf16_tflops << " TFLOPs (18*M*N*K = 9x logical)\n";
+}
 
 void emulate_sgemm(float *A, float *B, float *C, int M, int N, int K, float alpha, float beta)
 {
@@ -711,7 +783,11 @@ void emulate_sgemm(float *A, float *B, float *C, int M, int N, int K, float alph
 
     bool fused = true;
     if(fused) {
-        wmma_fp32_emulated<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A, B, C, M, N, K, alpha, beta);
+        benchmark_wmma_fp32_emulated<BM, BN, BK, WM, WN>(A, B, C,
+                                                         M, N, K,
+                                                         alpha, beta,
+                                                         gemm_grid, gemm_block,
+                                                         /*num_iters=*/5);
     } else {
         // 1. Allocate BF16 slices: A0..A2, B0..B2
         size_t szA = size_t(M) * K;
