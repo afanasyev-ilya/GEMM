@@ -368,8 +368,8 @@ wmma_fp32_emulated(const float* __restrict__ A,
 
     __shared__ __align__(16) float As_f[2][BM][BK];
     __shared__ __align__(16) __nv_bfloat16 A0[2][BM][BK];
-    __shared__ __align__(16) __nv_bfloat16 A1[2][BK][BN];
-    __shared__ __align__(16) __nv_bfloat16 A2[2][BK][BN];
+    __shared__ __align__(16) __nv_bfloat16 A1[2][BM][BK];
+    __shared__ __align__(16) __nv_bfloat16 A2[2][BM][BK];
 
     __shared__ __align__(16) float Bs_f[2][BK][BN];
     __shared__ __align__(16) __nv_bfloat16 B0[2][BK][BN];
@@ -622,40 +622,40 @@ wmma_fp32_emulated(const float* __restrict__ A,
                                    g4_frags[mi][nj]);
                 }
             }
-
-            // final scaling
-            const float s1 = ldexpf(1.0f, -8);   // 2^-8
-            const float s2 = ldexpf(1.0f, -16);  // 2^-16
-            const float s3 = ldexpf(1.0f, -24);  // 2^-24
-            const float s4 = ldexpf(1.0f, -32);  // 2^-32
-
-            #pragma unroll
-            for (int mi = 0; mi < WARP_M_TILES; ++mi) {
-                #pragma unroll
-                for (int nj = 0; nj < WARP_N_TILES; ++nj) {
-                    #pragma unroll
-                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
-                        float g0 = c_frags [mi][nj].x[e];
-                        float g1 = g1_frags[mi][nj].x[e];
-                        float g2 = g2_frags[mi][nj].x[e];
-                        float g3 = g3_frags[mi][nj].x[e];
-                        float g4 = g4_frags[mi][nj].x[e];
-
-                        c_frags[mi][nj].x[e] =
-                            g0
-                        + s1 * g1
-                        + s2 * g2
-                        + s3 * g3
-                        + s4 * g4;
-                    }
-                }
-            }
         }
 
         // Ensure next tile's async copies are done before we use it
         if (tile_k + 1 < num_k_tiles) {
             asm volatile("cp.async.wait_group 0;\n" ::);
             __syncthreads();
+        }
+    }
+
+    // final scaling
+    const float s1 = ldexpf(1.0f, -8);   // 2^-8
+    const float s2 = ldexpf(1.0f, -16);  // 2^-16
+    const float s3 = ldexpf(1.0f, -24);  // 2^-24
+    const float s4 = ldexpf(1.0f, -32);  // 2^-32
+
+    #pragma unroll
+    for (int mi = 0; mi < WARP_M_TILES; ++mi) {
+        #pragma unroll
+        for (int nj = 0; nj < WARP_N_TILES; ++nj) {
+            #pragma unroll
+            for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
+                float g0 = c_frags [mi][nj].x[e];
+                float g1 = g1_frags[mi][nj].x[e];
+                float g2 = g2_frags[mi][nj].x[e];
+                float g3 = g3_frags[mi][nj].x[e];
+                float g4 = g4_frags[mi][nj].x[e];
+
+                c_frags[mi][nj].x[e] =
+                    g0
+                + s1 * g1
+                + s2 * g2
+                + s3 * g3
+                + s4 * g4;
+            }
         }
     }
 
