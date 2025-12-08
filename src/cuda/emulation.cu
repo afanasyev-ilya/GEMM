@@ -323,6 +323,7 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
 
 template<int BM, int BN, int BK, int WM, int WN>
 __global__ void
+__launch_bounds__(256)
 wmma_fp32_emulated(const float* __restrict__ A,
                    const float* __restrict__ B,
                    float      * __restrict__ C,
@@ -369,14 +370,14 @@ wmma_fp32_emulated(const float* __restrict__ A,
     constexpr int WARP_N_TILES = WN / WMMA_N;
 
     __shared__ __align__(16) float As_f[2][BM][BK];
-    __shared__ __align__(16) __nv_bfloat16 A0[2][BM][BK];
-    __shared__ __align__(16) __nv_bfloat16 A1[2][BM][BK];
-    __shared__ __align__(16) __nv_bfloat16 A2[2][BM][BK];
+    __shared__ __align__(16) __nv_bfloat16 A0[BM][BK];
+    __shared__ __align__(16) __nv_bfloat16 A1[BM][BK];
+    __shared__ __align__(16) __nv_bfloat16 A2[BM][BK];
 
     __shared__ __align__(16) float Bs_f[2][BK][BN];
-    __shared__ __align__(16) __nv_bfloat16 B0[2][BK][BN];
-    __shared__ __align__(16) __nv_bfloat16 B1[2][BK][BN];
-    __shared__ __align__(16) __nv_bfloat16 B2[2][BK][BN];
+    __shared__ __align__(16) __nv_bfloat16 B0[BK][BN];
+    __shared__ __align__(16) __nv_bfloat16 B1[BK][BN];
+    __shared__ __align__(16) __nv_bfloat16 B2[BK][BN];
 
     const int num_k_tiles = (K + BK - 1) / BK;
 
@@ -477,9 +478,9 @@ wmma_fp32_emulated(const float* __restrict__ A,
             __nv_bfloat16 d0, d1, d2;
             fp32_to_bf16x3(a, d0, d1, d2);
 
-            A0[stage][row][col] = d0;
-            A1[stage][row][col] = d1;
-            A2[stage][row][col] = d2;
+            A0[row][col] = d0;
+            A1[row][col] = d1;
+            A2[row][col] = d2;
         }
 
         const int tile_elems_B = BK * BN;
@@ -492,9 +493,9 @@ wmma_fp32_emulated(const float* __restrict__ A,
             __nv_bfloat16 d0, d1, d2;
             fp32_to_bf16x3(b, d0, d1, d2);
 
-            B0[stage][row][col] = d0;
-            B1[stage][row][col] = d1;
-            B2[stage][row][col] = d2;
+            B0[row][col] = d0;
+            B1[row][col] = d1;
+            B2[row][col] = d2;
         }
 
         __syncthreads(); // ensure all digits are ready before WMMA uses them
@@ -540,9 +541,9 @@ wmma_fp32_emulated(const float* __restrict__ A,
                 int a_row = (warp_c_row - block_row) + mi * WMMA_M; // within [0, BM)
                 int a_col = kk;                                     // within [0, BK)
 
-                const __nv_bfloat16* a0_ptr = &A0[stage][a_row][a_col];
-                const __nv_bfloat16* a1_ptr = &A1[stage][a_row][a_col];
-                const __nv_bfloat16* a2_ptr = &A2[stage][a_row][a_col];
+                const __nv_bfloat16* a0_ptr = &A0[a_row][a_col];
+                const __nv_bfloat16* a1_ptr = &A1[a_row][a_col];
+                const __nv_bfloat16* a2_ptr = &A2[a_row][a_col];
 
                 wmma::load_matrix_sync(a0_frags[mi], a0_ptr, BK);
                 wmma::load_matrix_sync(a1_frags[mi], a1_ptr, BK);
@@ -562,9 +563,9 @@ wmma_fp32_emulated(const float* __restrict__ A,
                 int b_row = kk;                                     // within [0, BK)
                 int b_col = (warp_c_col - block_col) + nj * WMMA_N; // within [0, BN)
 
-                const __nv_bfloat16* b0_ptr = &B0[stage][b_row][b_col];
-                const __nv_bfloat16* b1_ptr = &B1[stage][b_row][b_col];
-                const __nv_bfloat16* b2_ptr = &B2[stage][b_row][b_col];
+                const __nv_bfloat16* b0_ptr = &B0[b_row][b_col];
+                const __nv_bfloat16* b1_ptr = &B1[b_row][b_col];
+                const __nv_bfloat16* b2_ptr = &B2[b_row][b_col];
 
                 wmma::load_matrix_sync(b0_frags[nj], b0_ptr, BN);
                 wmma::load_matrix_sync(b1_frags[nj], b1_ptr, BN);
