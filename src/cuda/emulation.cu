@@ -366,14 +366,15 @@ wmma_fp32_emulated(const float* __restrict__ A,
     constexpr int WARP_M_TILES = WM / WMMA_M;
     constexpr int WARP_N_TILES = WN / WMMA_N;
 
-    // -----------------------------------------------------------------------
-    // Shared memory: **double-buffered** block tiles of A and B
-    // As[stage][BM][BK], Bs[stage][BK][BN], stage ∈ {0,1}
-    // -----------------------------------------------------------------------
     __shared__ __align__(16) float As_f[2][BM][BK];
-    __shared__ __align__(16) __nv_bfloat16 A0[2][BM][BK];   // 2 x (BM x BK)
-    __shared__ __align__(16) __nv_bfloat16 A1[2][BK][BN];   // 2 x (BK x BN)
-    __shared__ __align__(16) __nv_bfloat16 A2[2][BK][BN];   // 2 x (BK x BN)
+    __shared__ __align__(16) __nv_bfloat16 A0[2][BM][BK];
+    __shared__ __align__(16) __nv_bfloat16 A1[2][BK][BN];
+    __shared__ __align__(16) __nv_bfloat16 A2[2][BK][BN];
+
+    __shared__ __align__(16) float Bs_f[2][BK][BN];
+    __shared__ __align__(16) __nv_bfloat16 B0[2][BK][BN];
+    __shared__ __align__(16) __nv_bfloat16 B1[2][BK][BN];
+    __shared__ __align__(16) __nv_bfloat16 B2[2][BK][BN];
 
     const int num_k_tiles = (K + BK - 1) / BK;
 
@@ -382,16 +383,27 @@ wmma_fp32_emulated(const float* __restrict__ A,
     const int num_vec_B = (BK * BN) / VECTOR_LENGTH;
 
     // -----------------------------------------------------------------------
-    // Accumulator fragments per warp
+    // Accumulator fragments
     // -----------------------------------------------------------------------
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float>
-        c_frags[WARP_M_TILES][WARP_N_TILES];
+
+    using acc_frag_t =
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float>;
+
+    acc_frag_t c_frags [WARP_M_TILES][WARP_N_TILES]; // G0
+    acc_frag_t g1_frags[WARP_M_TILES][WARP_N_TILES]; // G1 = A0B1 + A1B0
+    acc_frag_t g2_frags[WARP_M_TILES][WARP_N_TILES]; // G2 = A0B2 + A1B1 + A2B0
+    acc_frag_t g3_frags[WARP_M_TILES][WARP_N_TILES]; // G3 = A1B2 + A2B1
+    acc_frag_t g4_frags[WARP_M_TILES][WARP_N_TILES]; // G4 = A2B2
 
     #pragma unroll
     for (int mi = 0; mi < WARP_M_TILES; ++mi) {
         #pragma unroll
         for (int nj = 0; nj < WARP_N_TILES; ++nj) {
-            wmma::fill_fragment(c_frags[mi][nj], 0.0f);
+            wmma::fill_fragment(c_frags [mi][nj], 0.0f);
+            wmma::fill_fragment(g1_frags[mi][nj], 0.0f);
+            wmma::fill_fragment(g2_frags[mi][nj], 0.0f);
+            wmma::fill_fragment(g3_frags[mi][nj], 0.0f);
+            wmma::fill_fragment(g4_frags[mi][nj], 0.0f);
         }
     }
 
@@ -399,7 +411,6 @@ wmma_fp32_emulated(const float* __restrict__ A,
     // Lambda: issue cp.async copies for tile `tile_k` into shared buffer `stage`
     // (no commit/wait inside; those are done outside around the compute)
     // -----------------------------------------------------------------------
-
     auto cp_async_load_fp32 = [&](int stage, int tile_k) {
         const int k_base = tile_k * BK;
 
@@ -427,6 +438,64 @@ wmma_fp32_emulated(const float* __restrict__ A,
                 : "r"(smem_addr), "l"(g_ptr)
             );
         }
+
+        // ---- B tile: BK x BN ----
+        #pragma unroll
+        for (int vec_idx = tid; vec_idx < num_vec_B; vec_idx += block_threads) {
+            int linear_elem = vec_idx * VECTOR_LENGTH; // [0, BK*BN)
+            int row         = linear_elem / BN;        // [0, BK)
+            int col         = linear_elem % BN;        // [0, BN), step VECTOR_LENGTH
+
+            int global_row = k_base    + row;
+            int global_col = block_col + col;
+
+            const float* g_ptr = &B[global_row * ldb + global_col];
+            const float* s_ptr = &Bs_f[stage][row][col];
+
+            unsigned int smem_addr = static_cast<unsigned int>(
+                __cvta_generic_to_shared(const_cast<float*>(s_ptr))
+            );
+
+            asm volatile(
+                "cp.async.cg.shared.global [%0], [%1], 16;\n"
+                :
+                : "r"(smem_addr), "l"(g_ptr)
+            );
+        }
+    };
+
+    auto convert_tile_to_digits = [&](int stage) {
+        const int tile_elems_A = BM * BK;
+        for (int idx = tid; idx < tile_elems_A; idx += block_threads) {
+            int row = idx / BK;
+            int col = idx % BK;
+
+            float a = As_f[stage][row][col];
+
+            __nv_bfloat16 d0, d1, d2;
+            fp32_to_bf16x3(a, d0, d1, d2);
+
+            A0[stage][row][col] = d0;
+            A1[stage][row][col] = d1;
+            A2[stage][row][col] = d2;
+        }
+
+        const int tile_elems_B = BK * BN;
+        for (int idx = tid; idx < tile_elems_B; idx += block_threads) {
+            int row = idx / BN;
+            int col = idx % BN;
+
+            float b = Bs_f[stage][row][col];
+
+            __nv_bfloat16 d0, d1, d2;
+            fp32_to_bf16x3(b, d0, d1, d2);
+
+            B0[stage][row][col] = d0;
+            B1[stage][row][col] = d1;
+            B2[stage][row][col] = d2;
+        }
+
+        __syncthreads(); // ensure all digits are ready before WMMA uses them
     };
 
     // -----------------------------------------------------------------------
@@ -440,6 +509,187 @@ wmma_fp32_emulated(const float* __restrict__ A,
         asm volatile("cp.async.wait_group 0;\n" ::);
         __syncthreads();
     }
+
+    for (int tile_k = 0; tile_k < num_k_tiles; ++tile_k) {
+        const int stage       = tile_k & 1;        // current stage
+        const int next_stage  = stage ^ 1;         // other stage
+
+        // Preload next tile (tile_k + 1) into the other stage while we compute
+        if (tile_k + 1 < num_k_tiles) {
+            cp_async_load_fp32(next_stage, tile_k + 1);
+            asm volatile("cp.async.commit_group;\n" ::);
+        }
+
+        convert_tile_to_digits(stage);
+
+        // --- WMMA multiply-adds for this K-tile (stage) ---
+        #pragma unroll
+        for (int kk = 0; kk < BK; kk += WMMA_K) { 
+            // A frags per "row" of MMA tiles in this warp tile, 3 digits
+            wmma::fragment<wmma::matrix_a,
+                           WMMA_M, WMMA_N, WMMA_K,
+                           __nv_bfloat16, wmma::row_major> 
+                a0_frags[WARP_M_TILES],
+                a1_frags[WARP_M_TILES],
+                a2_frags[WARP_M_TILES];
+
+            #pragma unroll
+            for (int mi = 0; mi < WARP_M_TILES; ++mi) {
+                int a_row = (warp_c_row - block_row) + mi * WMMA_M; // within [0, BM)
+                int a_col = kk;                                     // within [0, BK)
+
+                const __nv_bfloat16* a0_ptr = &A0[stage][a_row][a_col];
+                const __nv_bfloat16* a1_ptr = &A1[stage][a_row][a_col];
+                const __nv_bfloat16* a2_ptr = &A2[stage][a_row][a_col];
+
+                wmma::load_matrix_sync(a0_frags[mi], a0_ptr, BK);
+                wmma::load_matrix_sync(a1_frags[mi], a1_ptr, BK);
+                wmma::load_matrix_sync(a2_frags[mi], a2_ptr, BK);
+            }
+
+            // B frags per "column" of MMA tiles in this warp tile, 3 digits
+            wmma::fragment<wmma::matrix_b,
+                           WMMA_M, WMMA_N, WMMA_K,
+                           __nv_bfloat16, wmma::row_major> 
+                b0_frags[WARP_N_TILES],
+                b1_frags[WARP_N_TILES],
+                b2_frags[WARP_N_TILES];
+
+            #pragma unroll
+            for (int nj = 0; nj < WARP_N_TILES; ++nj) {
+                int b_row = kk;                                     // within [0, BK)
+                int b_col = (warp_c_col - block_col) + nj * WMMA_N; // within [0, BN)
+
+                const __nv_bfloat16* b0_ptr = &B0[stage][b_row][b_col];
+                const __nv_bfloat16* b1_ptr = &B1[stage][b_row][b_col];
+                const __nv_bfloat16* b2_ptr = &B2[stage][b_row][b_col];
+
+                wmma::load_matrix_sync(b0_frags[nj], b0_ptr, BN);
+                wmma::load_matrix_sync(b1_frags[nj], b1_ptr, BN);
+                wmma::load_matrix_sync(b2_frags[nj], b2_ptr, BN);
+            }
+
+            // Now do all MMA updates reusing these fragments
+            #pragma unroll
+            for (int mi = 0; mi < WARP_M_TILES; ++mi) {
+                #pragma unroll
+                for (int nj = 0; nj < WARP_N_TILES; ++nj) {
+
+                    // G0 = A0 * B0
+                    wmma::mma_sync(c_frags[mi][nj],
+                                   a0_frags[mi],
+                                   b0_frags[nj],
+                                   c_frags[mi][nj]);
+
+                    // G1 = A0*B1 + A1*B0
+                    wmma::mma_sync(g1_frags[mi][nj],
+                                   a0_frags[mi],
+                                   b1_frags[nj],
+                                   g1_frags[mi][nj]);
+                    wmma::mma_sync(g1_frags[mi][nj],
+                                   a1_frags[mi],
+                                   b0_frags[nj],
+                                   g1_frags[mi][nj]);
+
+                    // G2 = A0*B2 + A1*B1 + A2*B0
+                    wmma::mma_sync(g2_frags[mi][nj],
+                                   a0_frags[mi],
+                                   b2_frags[nj],
+                                   g2_frags[mi][nj]);
+                    wmma::mma_sync(g2_frags[mi][nj],
+                                   a1_frags[mi],
+                                   b1_frags[nj],
+                                   g2_frags[mi][nj]);
+                    wmma::mma_sync(g2_frags[mi][nj],
+                                   a2_frags[mi],
+                                   b0_frags[nj],
+                                   g2_frags[mi][nj]);
+
+                    // G3 = A1*B2 + A2*B1
+                    wmma::mma_sync(g3_frags[mi][nj],
+                                   a1_frags[mi],
+                                   b2_frags[nj],
+                                   g3_frags[mi][nj]);
+                    wmma::mma_sync(g3_frags[mi][nj],
+                                   a2_frags[mi],
+                                   b1_frags[nj],
+                                   g3_frags[mi][nj]);
+
+                    // G4 = A2 * B2
+                    wmma::mma_sync(g4_frags[mi][nj],
+                                   a2_frags[mi],
+                                   b2_frags[nj],
+                                   g4_frags[mi][nj]);
+                }
+            }
+
+            // final scaling
+            const float s1 = ldexpf(1.0f, -8);   // 2^-8
+            const float s2 = ldexpf(1.0f, -16);  // 2^-16
+            const float s3 = ldexpf(1.0f, -24);  // 2^-24
+            const float s4 = ldexpf(1.0f, -32);  // 2^-32
+
+            #pragma unroll
+            for (int mi = 0; mi < WARP_M_TILES; ++mi) {
+                #pragma unroll
+                for (int nj = 0; nj < WARP_N_TILES; ++nj) {
+                    #pragma unroll
+                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
+                        float g0 = c_frags [mi][nj].x[e];
+                        float g1 = g1_frags[mi][nj].x[e];
+                        float g2 = g2_frags[mi][nj].x[e];
+                        float g3 = g3_frags[mi][nj].x[e];
+                        float g4 = g4_frags[mi][nj].x[e];
+
+                        c_frags[mi][nj].x[e] =
+                            g0
+                        + s1 * g1
+                        + s2 * g2
+                        + s3 * g3
+                        + s4 * g4;
+                    }
+                }
+            }
+        }
+
+        // Ensure next tile's async copies are done before we use it
+        if (tile_k + 1 < num_k_tiles) {
+            asm volatile("cp.async.wait_group 0;\n" ::);
+            __syncthreads();
+        }
+    }
+
+    #pragma unroll
+    for (int mi = 0; mi < WARP_M_TILES; ++mi) {
+        #pragma unroll
+        for (int nj = 0; nj < WARP_N_TILES; ++nj) {
+            int row = warp_c_row + mi * WMMA_M;
+            int col = warp_c_col + nj * WMMA_N;
+
+            if (row + WMMA_M <= M && col + WMMA_N <= N) {
+                float* c_ptr = &C[row * ldc + col];
+
+                if(beta == 0) {
+                    #pragma unroll
+                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
+                        c_frags[mi][nj].x[e] =
+                            alpha * c_frags[mi][nj].x[e];
+                    }
+                } else {
+                    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> c_old;
+                    wmma::load_matrix_sync(c_old, c_ptr, ldc, wmma::mem_row_major);
+
+                    #pragma unroll
+                    for (int e = 0; e < c_frags[mi][nj].num_elements; ++e) {
+                        c_frags[mi][nj].x[e] =
+                            alpha * c_frags[mi][nj].x[e] + beta * c_old.x[e];
+                    }
+                }
+
+                wmma::store_matrix_sync(c_ptr, c_frags[mi][nj], ldc, wmma::mem_row_major);
+            }
+        }
+    }
 }
 
 
@@ -447,8 +697,8 @@ wmma_fp32_emulated(const float* __restrict__ A,
 
 void emulate_sgemm(float *A, float *B, float *C, int M, int N, int K, float alpha, float beta)
 {
-    const int BM = 128;
-    const int BN = 128;
+    const int BM = 64;
+    const int BN = 64;
     const int BK = 16;
 
     const int WM = 64;
