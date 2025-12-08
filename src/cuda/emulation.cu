@@ -780,6 +780,7 @@ void emulate_sgemm(float *A, float *B, float *C, int M, int N, int K, float alph
 
     dim3 gemm_block(WARP_SIZE, WARPS_PER_BLOCK);
     dim3 gemm_grid(CEIL_DIV(N, BN), CEIL_DIV(M, BM), 1);
+    std::cout << "BLOCK size: " << gemm_block.x << " x " << gemm_block.y << " = " << gemm_block.x * gemm_block.y << std::endl;
 
     bool fused = true;
     if(fused) {
