@@ -707,7 +707,7 @@ void benchmark_wmma_fp32_emulated(const float* dA,
                                   int num_iters = 50)
 {
     // Warm-up
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 1; ++i) {
         wmma_fp32_emulated<BM, BN, BK, WM, WN>
             <<<gemm_grid, gemm_block>>>(dA, dB, dC, M, N, K, alpha, beta);
     }
@@ -773,8 +773,8 @@ void emulate_sgemm(float *A, float *B, float *C, int M, int N, int K, float alph
     const int BN = 64;
     const int BK = 16;
 
-    const int WM = 64;
-    const int WN = 64;
+    const int WM = 16;
+    const int WN = 32;
 
     const int WARPS_PER_BLOCK = (BM / WM) * (BN / WN);
 
@@ -787,7 +787,7 @@ void emulate_sgemm(float *A, float *B, float *C, int M, int N, int K, float alph
                                                          M, N, K,
                                                          alpha, beta,
                                                          gemm_grid, gemm_block,
-                                                         /*num_iters=*/5);
+                                                         /*num_iters=*/1);
     } else {
         // 1. Allocate BF16 slices: A0..A2, B0..B2
         size_t szA = size_t(M) * K;
@@ -795,7 +795,6 @@ void emulate_sgemm(float *A, float *B, float *C, int M, int N, int K, float alph
 
         int lda = K;
         int ldb = N;
-        int ldc = N;
 
         __nv_bfloat16 *A0, *A1, *A2;
         __nv_bfloat16 *B0, *B1, *B2;
