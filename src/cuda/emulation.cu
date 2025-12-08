@@ -318,45 +318,135 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
     }
 }
 
+
+template<int BM, int BN, int BK, int WM, int WN>
+__global__ void
+wmma_fp32_emulated(const float* __restrict__ A,
+                   const float* __restrict__ B,
+                   float      * __restrict__ C,
+                   int M, int N, int K,
+                   float alpha, float beta)
+{
+    constexpr int WARP_SIZE = 32;
+
+    static_assert(WM % WMMA_M == 0, "WM must be multiple of 16");
+    static_assert(WN % WMMA_N == 0, "WN must be multiple of 16");
+    static_assert(BK % WMMA_K == 0, "BK must be multiple of 16");
+
+    // --- vectorization config for fp32 ---
+    constexpr int VECTOR_LENGTH = 4;     // 8 bf16 per 16-byte vector
+    using Vec = uint4;                   // 16-byte raw vector
+
+    static_assert(BK % VECTOR_LENGTH == 0, "BK must be multiple of vector width");
+    static_assert(BN % VECTOR_LENGTH == 0, "BN must be multiple of vector width");
+
+    // block tile origin in C
+    const int block_row = blockIdx.y * BM;
+    const int block_col = blockIdx.x * BN;
+
+    // leading dims
+    const int lda = K;
+    const int ldb = N;
+    const int ldc = N;
+
+    // thread / warp ids
+    const int tid     = threadIdx.x + blockDim.x * threadIdx.y;
+    const int warp_id = tid / WARP_SIZE;
+
+    // warp tiling in the block
+    constexpr int WARPS_PER_BLOCK_N = BN / WN;
+
+    const int warp_row = warp_id / WARPS_PER_BLOCK_N;
+    const int warp_col = warp_id % WARPS_PER_BLOCK_N;
+
+    const int warp_c_row = block_row + warp_row * WM;
+    const int warp_c_col = block_col + warp_col * WN;
+
+    // Warp tile decomposed into MMA tiles
+    constexpr int WARP_M_TILES = WM / WMMA_M;
+    constexpr int WARP_N_TILES = WN / WMMA_N;
+
+    // -----------------------------------------------------------------------
+    // Shared memory: **double-buffered** block tiles of A and B
+    // As[stage][BM][BK], Bs[stage][BK][BN], stage ∈ {0,1}
+    // -----------------------------------------------------------------------
+    __shared__ __align__(16) float As_f[2][BM][BK];
+    __shared__ __align__(16) __nv_bfloat16 A0[2][BM][BK];   // 2 x (BM x BK)
+    __shared__ __align__(16) __nv_bfloat16 A1[2][BK][BN];   // 2 x (BK x BN)
+    __shared__ __align__(16) __nv_bfloat16 A2[2][BK][BN];   // 2 x (BK x BN)
+
+    const int num_k_tiles = (K + BK - 1) / BK;
+
+    const int block_threads = blockDim.x * blockDim.y;
+    const int num_vec_A = (BM * BK) / VECTOR_LENGTH;
+    const int num_vec_B = (BK * BN) / VECTOR_LENGTH;
+
+    // -----------------------------------------------------------------------
+    // Accumulator fragments per warp
+    // -----------------------------------------------------------------------
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float>
+        c_frags[WARP_M_TILES][WARP_N_TILES];
+
+    #pragma unroll
+    for (int mi = 0; mi < WARP_M_TILES; ++mi) {
+        #pragma unroll
+        for (int nj = 0; nj < WARP_N_TILES; ++nj) {
+            wmma::fill_fragment(c_frags[mi][nj], 0.0f);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Lambda: issue cp.async copies for tile `tile_k` into shared buffer `stage`
+    // (no commit/wait inside; those are done outside around the compute)
+    // -----------------------------------------------------------------------
+
+    auto cp_async_load_fp32 = [&](int stage, int tile_k) {
+        const int k_base = tile_k * BK;
+
+        // ---- A tile: BM x BK ----
+        #pragma unroll
+        for (int vec_idx = tid; vec_idx < num_vec_A; vec_idx += block_threads) {
+            int linear_elem = vec_idx * VECTOR_LENGTH; // [0, BM*BK)
+            int row         = linear_elem / BK;        // [0, BM)
+            int col         = linear_elem % BK;        // [0, BK), step VECTOR_LENGTH
+
+            int global_row = block_row + row;
+            int global_col = k_base    + col;
+
+            const float* g_ptr = &A[global_row * lda + global_col];
+            const float* s_ptr = &As_f[stage][row][col];
+
+            // shared memory address as 32-bit
+            unsigned int smem_addr = static_cast<unsigned int>(
+                __cvta_generic_to_shared(const_cast<float*>(s_ptr))
+            );
+
+            asm volatile(
+                "cp.async.cg.shared.global [%0], [%1], 16;\n"
+                :
+                : "r"(smem_addr), "l"(g_ptr)
+            );
+        }
+    };
+
+    // -----------------------------------------------------------------------
+    // K-tile loop with double buffering and async copies
+    // -----------------------------------------------------------------------
+
+    if (num_k_tiles > 0) {
+        // Preload first K-tile into stage 0
+        cp_async_load_fp32(/*stage=*/0, /*tile_k=*/0);
+        asm volatile("cp.async.commit_group;\n" ::);
+        asm volatile("cp.async.wait_group 0;\n" ::);
+        __syncthreads();
+    }
+}
+
+
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 void emulate_sgemm(float *A, float *B, float *C, int M, int N, int K, float alpha, float beta)
 {
-    // 1. Allocate BF16 slices: A0..A2, B0..B2
-    size_t szA = size_t(M) * K;
-    size_t szB = size_t(K) * N;
-
-    int lda = K;
-    int ldb = N;
-    int ldc = N;
-
-    __nv_bfloat16 *A0, *A1, *A2;
-    __nv_bfloat16 *B0, *B1, *B2;
-    cudaMalloc(&A0, szA * sizeof(__nv_bfloat16));
-    cudaMalloc(&A1, szA * sizeof(__nv_bfloat16));
-    cudaMalloc(&A2, szA * sizeof(__nv_bfloat16));
-    cudaMalloc(&B0, szB * sizeof(__nv_bfloat16));
-    cudaMalloc(&B1, szB * sizeof(__nv_bfloat16));
-    cudaMalloc(&B2, szB * sizeof(__nv_bfloat16));
-
-    // 2. Slice A and B into 3 BF16 pieces each
-    dim3 block(16, 16);
-    dim3 gridA((K + block.x - 1)/block.x,
-               (M + block.y - 1)/block.y);
-    dim3 gridB((N + block.x - 1)/block.x,
-               (K + block.y - 1)/block.y);
-
-    slice_fp32_to_bf16x3<<<gridA, block, 0>>>(
-        A, A0, A1, A2, M, K, lda, K);
-    slice_fp32_to_bf16x3<<<gridB, block, 0>>>(
-        B, B0, B1, B2, K, N, ldb, N);
-
-    // 3. Compute C = beta*C + alpha * (full BF16x9 expansion)
-    const float s1  = ldexpf(1.0f, -8);   // 2^-8
-    const float s2  = ldexpf(1.0f, -16);  // 2^-16
-    const float s3  = ldexpf(1.0f, -24);  // 2^-24
-    const float s4  = ldexpf(1.0f, -32);  // 2^-32
-
     const int BM = 128;
     const int BN = 128;
     const int BK = 16;
@@ -369,29 +459,67 @@ void emulate_sgemm(float *A, float *B, float *C, int M, int N, int K, float alph
     dim3 gemm_block(WARP_SIZE, WARPS_PER_BLOCK);
     dim3 gemm_grid(CEIL_DIV(N, BN), CEIL_DIV(M, BM), 1);
 
-    // Term group: A0B0
-    wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A0, B0, C, M, N, K, alpha, beta);
-    // C = beta*C + alpha*A0B0
+    bool fused = true;
+    if(fused) {
+        wmma_fp32_emulated<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A, B, C, M, N, K, alpha, beta);
+    } else {
+        // 1. Allocate BF16 slices: A0..A2, B0..B2
+        size_t szA = size_t(M) * K;
+        size_t szB = size_t(K) * N;
 
-    // Group 2: 2^-8 (A0B1 + A1B0)
-    wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A0, B1, C, M, N, K, alpha * s1, 1.0f);
-    wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A1, B0, C, M, N, K, alpha * s1, 1.0f);
+        int lda = K;
+        int ldb = N;
+        int ldc = N;
 
-    // Group 3: 2^-16 (A0B2 + A1B1 + A2B0)
-    wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A0, B2, C, M, N, K, alpha * s2, 1.0f);
-    wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A1, B1, C, M, N, K, alpha * s2, 1.0f);
-    wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A2, B0, C, M, N, K, alpha * s2, 1.0f);
+        __nv_bfloat16 *A0, *A1, *A2;
+        __nv_bfloat16 *B0, *B1, *B2;
+        cudaMalloc(&A0, szA * sizeof(__nv_bfloat16));
+        cudaMalloc(&A1, szA * sizeof(__nv_bfloat16));
+        cudaMalloc(&A2, szA * sizeof(__nv_bfloat16));
+        cudaMalloc(&B0, szB * sizeof(__nv_bfloat16));
+        cudaMalloc(&B1, szB * sizeof(__nv_bfloat16));
+        cudaMalloc(&B2, szB * sizeof(__nv_bfloat16));
 
-    // Group 4: 2^-24 (A1B2 + A2B1)
-    wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A1, B2, C, M, N, K, alpha * s3, 1.0f);
-    wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A2, B1, C, M, N, K, alpha * s3, 1.0f);
+        // 2. Slice A and B into 3 BF16 pieces each
+        dim3 block(16, 16);
+        dim3 gridA((K + block.x - 1)/block.x,
+                (M + block.y - 1)/block.y);
+        dim3 gridB((N + block.x - 1)/block.x,
+                (K + block.y - 1)/block.y);
 
-    // Group 5: 2^-32 (A2B2)
-    wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A2, B2, C, M, N, K, alpha * s4, 1.0f);
+        slice_fp32_to_bf16x3<<<gridA, block, 0>>>(A, A0, A1, A2, M, K, lda, K);
+        slice_fp32_to_bf16x3<<<gridB, block, 0>>>(B, B0, B1, B2, K, N, ldb, N);
 
-    // 4. Free slices
-    cudaFree(A0); cudaFree(A1); cudaFree(A2);
-    cudaFree(B0); cudaFree(B1); cudaFree(B2);
+        // 3. Compute C = beta*C + alpha * (full BF16x9 expansion)
+        const float s1  = ldexpf(1.0f, -8);   // 2^-8
+        const float s2  = ldexpf(1.0f, -16);  // 2^-16
+        const float s3  = ldexpf(1.0f, -24);  // 2^-24
+        const float s4  = ldexpf(1.0f, -32);  // 2^-32
+
+        // Term group: A0B0
+        wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A0, B0, C, M, N, K, alpha, beta);
+        // C = beta*C + alpha*A0B0
+
+        // Group 2: 2^-8 (A0B1 + A1B0)
+        wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A0, B1, C, M, N, K, alpha * s1, 1.0f);
+        wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A1, B0, C, M, N, K, alpha * s1, 1.0f);
+
+        // Group 3: 2^-16 (A0B2 + A1B1 + A2B0)
+        wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A0, B2, C, M, N, K, alpha * s2, 1.0f);
+        wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A1, B1, C, M, N, K, alpha * s2, 1.0f);
+        wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A2, B0, C, M, N, K, alpha * s2, 1.0f);
+
+        // Group 4: 2^-24 (A1B2 + A2B1)
+        wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A1, B2, C, M, N, K, alpha * s3, 1.0f);
+        wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A2, B1, C, M, N, K, alpha * s3, 1.0f);
+
+        // Group 5: 2^-32 (A2B2)
+        wmma_bf16_gemm_async_kernel<BM, BM, BK, WM, WN><<<gemm_grid, gemm_block>>>(A2, B2, C, M, N, K, alpha * s4, 1.0f);
+
+        // 4. Free slices
+        cudaFree(A0); cudaFree(A1); cudaFree(A2);
+        cudaFree(B0); cudaFree(B1); cudaFree(B2);
+    }
 }
 
 
