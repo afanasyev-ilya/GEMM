@@ -324,7 +324,7 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
 template<int BM, int BN, int BK, int WM, int WN>
 __global__ void
 __launch_bounds__(256)
-wmma_fp32_emulated(const float* __restrict__ A,
+wmma_async(const float* __restrict__ A,
                    const float* __restrict__ B,
                    float      * __restrict__ C,
                    int M, int N, int K,
@@ -369,15 +369,18 @@ wmma_fp32_emulated(const float* __restrict__ A,
     constexpr int WARP_M_TILES = WM / WMMA_M;
     constexpr int WARP_N_TILES = WN / WMMA_N;
 
-    __shared__ __align__(16) float As_f[2][BM][BK];
-    __shared__ __align__(16) __nv_bfloat16 A0[BM][BK];
-    __shared__ __align__(16) __nv_bfloat16 A1[BM][BK];
-    __shared__ __align__(16) __nv_bfloat16 A2[BM][BK];
+    constexpr int PAD = 8;
+    constexpr int STRIDE_A = BK + PAD;
+    constexpr int STRIDE_B = BN + PAD;
+    __shared__ __align__(16) float As_f[2][BM][STRIDE_A];
+    __shared__ __align__(16) __nv_bfloat16 A0[BM][STRIDE_A];
+    __shared__ __align__(16) __nv_bfloat16 A1[BM][STRIDE_A];
+    __shared__ __align__(16) __nv_bfloat16 A2[BM][STRIDE_A];
 
-    __shared__ __align__(16) float Bs_f[2][BK][BN];
-    __shared__ __align__(16) __nv_bfloat16 B0[BK][BN];
-    __shared__ __align__(16) __nv_bfloat16 B1[BK][BN];
-    __shared__ __align__(16) __nv_bfloat16 B2[BK][BN];
+    __shared__ __align__(16) float Bs_f[2][BK][STRIDE_B];
+    __shared__ __align__(16) __nv_bfloat16 B0[BK][STRIDE_B];
+    __shared__ __align__(16) __nv_bfloat16 B1[BK][STRIDE_B];
+    __shared__ __align__(16) __nv_bfloat16 B2[BK][STRIDE_B];
 
     const int num_k_tiles = (K + BK - 1) / BK;
 
@@ -545,9 +548,9 @@ wmma_fp32_emulated(const float* __restrict__ A,
                 const __nv_bfloat16* a1_ptr = &A1[a_row][a_col];
                 const __nv_bfloat16* a2_ptr = &A2[a_row][a_col];
 
-                wmma::load_matrix_sync(a0_frags[mi], a0_ptr, BK);
-                wmma::load_matrix_sync(a1_frags[mi], a1_ptr, BK);
-                wmma::load_matrix_sync(a2_frags[mi], a2_ptr, BK);
+                wmma::load_matrix_sync(a0_frags[mi], a0_ptr, STRIDE_A);
+                wmma::load_matrix_sync(a1_frags[mi], a1_ptr, STRIDE_A);
+                wmma::load_matrix_sync(a2_frags[mi], a2_ptr, STRIDE_A);
             }
 
             // B frags per "column" of MMA tiles in this warp tile, 3 digits
@@ -567,9 +570,9 @@ wmma_fp32_emulated(const float* __restrict__ A,
                 const __nv_bfloat16* b1_ptr = &B1[b_row][b_col];
                 const __nv_bfloat16* b2_ptr = &B2[b_row][b_col];
 
-                wmma::load_matrix_sync(b0_frags[nj], b0_ptr, BN);
-                wmma::load_matrix_sync(b1_frags[nj], b1_ptr, BN);
-                wmma::load_matrix_sync(b2_frags[nj], b2_ptr, BN);
+                wmma::load_matrix_sync(b0_frags[nj], b0_ptr, STRIDE_B);
+                wmma::load_matrix_sync(b1_frags[nj], b1_ptr, STRIDE_B);
+                wmma::load_matrix_sync(b2_frags[nj], b2_ptr, STRIDE_B);
             }
 
             // Now do all MMA updates reusing these fragments
@@ -1049,7 +1052,7 @@ void benchmark_wmma_fp32_emulated(const float* dA,
     // Warm-up
     std::cout << "new version\n";
     for (int i = 0; i < 1; ++i) {
-        wmma_cta<BM, BN, BK, WM, WN>
+        wmma_async<BM, BN, BK, WM, WN>
             <<<gemm_grid, gemm_block>>>(dA, dB, dC, M, N, K, alpha, beta);
     }
     cudaDeviceSynchronize();
@@ -1063,7 +1066,7 @@ void benchmark_wmma_fp32_emulated(const float* dA,
     cudaEventRecord(start);
 
     for (int it = 0; it < num_iters; ++it) {
-        wmma_cta<BM, BN, BK, WM, WN>
+        wmma_async<BM, BN, BK, WM, WN>
             <<<gemm_grid, gemm_block>>>(dA, dB, dC, M, N, K, alpha, beta);
     }
 
