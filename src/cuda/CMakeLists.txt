@@ -26,6 +26,7 @@ target_compile_options(gemm_cuda_common
       --use_fast_math
       --expt-relaxed-constexpr
       --expt-extended-lambda
+      -Xptxas=-v
     >
 )
 
