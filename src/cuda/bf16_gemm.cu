@@ -342,8 +342,11 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
     constexpr int WARP_N_TILES = WN / WMMA_N;
 
     // Shared memory: block tile of A and B
-    __shared__ __align__(16) __nv_bfloat16 As[BM][BK];   // M x K
-    __shared__ __align__(16) __nv_bfloat16 Bs[BK][BN];   // K x N
+    constexpr int PAD = 8;
+    constexpr int STRIDE_A = BK + PAD;
+    constexpr int STRIDE_B = BN + PAD;
+    __shared__ __align__(16) __nv_bfloat16 As[BM][STRIDE_A];   // M x K
+    __shared__ __align__(16) __nv_bfloat16 Bs[BK][STRIDE_B];   // K x N
 
     const int num_k_tiles = (K + BK - 1) / BK;
 
@@ -429,7 +432,7 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
                 int a_col = kk;                                    // within As
 
                 const __nv_bfloat16* a_ptr = &As[a_row][a_col];
-                wmma::load_matrix_sync(a_frags[mi], a_ptr, BK);
+                wmma::load_matrix_sync(a_frags[mi], a_ptr, STRIDE_A);
             }
 
             // B frags for each "column" of MMA tiles in this warp tile
@@ -443,7 +446,7 @@ wmma_bf16_gemm_vector_loads_kernel(const __nv_bfloat16* __restrict__ A,
                 int b_col = (warp_c_col - block_col) + nj * WMMA_N;
 
                 const __nv_bfloat16* b_ptr = &Bs[b_row][b_col];
-                wmma::load_matrix_sync(b_frags[nj], b_ptr, BN);
+                wmma::load_matrix_sync(b_frags[nj], b_ptr, STRIDE_B);
             }
 
             // MMA: for each MMA tile in warp’s (WM x WN) region
@@ -754,7 +757,7 @@ using WNs  = ValueList<16, 32, 64, 128>;*/
 // smaller search space for demo and faster compilation
 using BMs  = ValueList<128>;
 using BNs  = ValueList<128>;
-using BKs  = ValueList<32, 64>;
+using BKs  = ValueList<16, 32, 64>;
 
 using WMs  = ValueList<32, 64, 128>;
 using WNs  = ValueList<32, 64, 128>;
@@ -871,6 +874,7 @@ int main(int argc, char** argv)
 
     // we autotune prev version here
     {
+        // BM=128, BN=128, BK=64, WM=128, WN=32 is actually best
         auto cfg = autotune_generic<__nv_bfloat16, WMMASpec>(handle, dA, dB, dC, M, N, K, iters, verify);
         std::cout << "best config WMMA " << cfg << std::endl; 
         run_autotuned_generic<__nv_bfloat16, WMMASpec>(cfg, handle, dA, dB, dC, M, N, K, iters, "autotuned WMMA", verify);
@@ -879,7 +883,7 @@ int main(int argc, char** argv)
     {
         auto cfg = autotune_generic<__nv_bfloat16, WMMAAsyncSpec>(handle, dA, dB, dC, M, N, K, iters, verify);
         std::cout << "best config ASYNC " << cfg << std::endl; 
-        run_autotuned_generic<__nv_bfloat16, WMMAAsyncSpec>(cfg, handle, dA, dB, dC, M, N, K, iters, "autotuned async WMMA", verify);
+        run_autotuned_generic<__nv_bfloat16, WMMAAsyncSpec>(cfg, handle, dA, dB, dC, M, N, K, iters, "autotuned async + PADS WMMA", verify);
     }
 
     
