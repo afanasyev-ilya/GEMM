@@ -544,8 +544,11 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
     // Shared memory: **double-buffered** block tiles of A and B
     // As[stage][BM][BK], Bs[stage][BK][BN], stage ∈ {0,1}
     // -----------------------------------------------------------------------
-    __shared__ __align__(16) __nv_bfloat16 As[2][BM][BK];   // 2 x (BM x BK)
-    __shared__ __align__(16) __nv_bfloat16 Bs[2][BK][BN];   // 2 x (BK x BN)
+    constexpr int PAD = 8;
+    constexpr int STRIDE_A = BK + PAD;
+    constexpr int STRIDE_B = BN + PAD;
+    __shared__ __align__(16) __nv_bfloat16 As[2][BM][STRIDE_A];   // 2 x (BM x BK)
+    __shared__ __align__(16) __nv_bfloat16 Bs[2][BK][STRIDE_B];   // 2 x (BK x BN)
 
     const int num_k_tiles = (K + BK - 1) / BK;
 
@@ -663,7 +666,7 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
                 int a_col = kk;                                    // within As
 
                 const __nv_bfloat16* a_ptr = &As[stage][a_row][a_col];
-                wmma::load_matrix_sync(a_frags[mi], a_ptr, BK);
+                wmma::load_matrix_sync(a_frags[mi], a_ptr, STRIDE_A);
             }
 
             // B frags for each "column" of MMA tiles in this warp tile
@@ -677,7 +680,7 @@ wmma_bf16_gemm_async_kernel(const __nv_bfloat16* __restrict__ A,
                 int b_col = (warp_c_col - block_col) + nj * WMMA_N;
 
                 const __nv_bfloat16* b_ptr = &Bs[stage][b_row][b_col];
-                wmma::load_matrix_sync(b_frags[nj], b_ptr, BN);
+                wmma::load_matrix_sync(b_frags[nj], b_ptr, STRIDE_B);
             }
 
             // MMA: for each MMA tile in warp’s (WM x WN) region
