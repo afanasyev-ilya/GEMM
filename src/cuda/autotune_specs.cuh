@@ -181,8 +181,9 @@ struct WMMASpec {
 
     template<int BM, int BN, int BK, int WM, int WN>
     static constexpr bool valid() {
+        constexpr int PAD = 8;
         constexpr size_t MAX_STATIC_SMEM = 48 * 1024; // 48 KiB
-        bool fits_shared = (BM*BK + BK*BN)*sizeof(__nv_bfloat16) <= MAX_STATIC_SMEM;
+        bool fits_shared = (BM*(BK + PAD) + BK*(BN + PAD))*sizeof(__nv_bfloat16) <= MAX_STATIC_SMEM;
         return fits_shared;
     }
 
@@ -251,7 +252,8 @@ struct WMMAAsyncSpec {
     template<int BM, int BN, int BK, int WM, int WN>
     static constexpr bool valid() {
         constexpr size_t MAX_STATIC_SMEM = 48 * 1024; // 48 KiB
-        bool fits_shared = 2*(BM*BK + BK*BN)*sizeof(__nv_bfloat16) <= MAX_STATIC_SMEM;
+        constexpr int PAD = 8;
+        bool fits_shared = 2*(BM*(BK + PAD) + BK*(BN + PAD))*sizeof(__nv_bfloat16) <= MAX_STATIC_SMEM;
         return fits_shared;
     }
 
